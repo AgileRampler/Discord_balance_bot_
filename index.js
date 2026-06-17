@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS transactions (
 )
 `).run();
 
+const fs = require("fs");
+
+setInterval(() => {
+  const date = new Date().toISOString().split("T")[0];
+
+  fs.copyFileSync(
+    "/data/economy.db",
+    `/data/backup-${date}.db`
+  );
+
+  console.log("Database backup created");
+}, 24 * 60 * 60 * 1000);
+
+
 function getBal(guildId, userId) {
   const row = db.prepare(
     "SELECT balance FROM users WHERE guild_id = ? AND user_id = ?"
