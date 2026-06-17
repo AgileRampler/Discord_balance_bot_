@@ -18,9 +18,10 @@ const Database = require("better-sqlite3");
 
 const dbPath = process.env.DB_PATH || "economy.db";
 console.log("Using database:", dbPath);
+
 const db = new Database(dbPath);
 
-const BOT_VERSION = "2.2.0";
+const BOT_VERSION = "2.3.0";
 const MAX_BET = 1_000_000;
 
 db.pragma("journal_mode = WAL");
@@ -145,6 +146,25 @@ function safeReply(interaction, data) {
   return interaction.reply(data).catch(() => {});
 }
 
+function chunkText(text, maxLength = 1900) {
+  if (text.length <= maxLength) return [text];
+
+  const chunks = [];
+  let current = "";
+
+  for (const line of text.split("\n")) {
+    if ((current + "\n" + line).length > maxLength) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current += current ? "\n" + line : line;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 const commands = [
   new SlashCommandBuilder()
     .setName("version")
@@ -228,7 +248,22 @@ const commands = [
           { name: "ENABLE", value: "enable" },
           { name: "DISABLE", value: "disable" }
         )
-    )
+    ),
+
+  new SlashCommandBuilder()
+    .setName("dbstats")
+    .setDescription("Admin only: show database stats")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("allbalances")
+    .setDescription("Admin only: show top 50 balances from database")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("transactions")
+    .setDescription("Admin only: show latest database transactions")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
@@ -779,6 +814,129 @@ client.on("interactionCreate", async interaction => {
       ).run(msg.id, gameId);
 
       return;
+    }
+
+    if (command === "dbstats") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
+      }
+
+      const users = db.prepare(
+        "SELECT COUNT(*) AS count FROM users WHERE guild_id = ?"
+      ).get(guildId);
+
+      const tx = db.prepare(
+        "SELECT COUNT(*) AS count FROM transactions WHERE guild_id = ?"
+      ).get(guildId);
+
+      const openFlips = db.prepare(
+        "SELECT COUNT(*) AS count FROM coinflips WHERE guild_id = ? AND status = 'open'"
+      ).get(guildId);
+
+      const finishedFlips = db.prepare(
+        "SELECT COUNT(*) AS count FROM coinflips WHERE guild_id = ? AND status = 'finished'"
+      ).get(guildId);
+
+      const totalCoins = db.prepare(
+        "SELECT COALESCE(SUM(balance), 0) AS total FROM users WHERE guild_id = ?"
+      ).get(guildId);
+
+      const dbFile = db.prepare("PRAGMA database_list").all();
+
+      const embed = new EmbedBuilder()
+        .setTitle("🗄️ DonkBot Database Stats")
+        .setColor(0xff3b3b)
+        .setDescription(
+          `👥 **Users:** ${users.count}\n` +
+          `📜 **Transactions:** ${tx.count}\n` +
+          `🪙 **Open Coinflips:** ${openFlips.count}\n` +
+          `✅ **Finished Coinflips:** ${finishedFlips.count}\n` +
+          `💰 **Total Coins:** ${Number(totalCoins.total).toLocaleString()}\n` +
+          `📁 **Database:** \`${dbPath}\`\n` +
+          `📌 **SQLite File:** \`${dbFile[0]?.file || "unknown"}\``
+        );
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (command === "allbalances") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
+      }
+
+      const rows = db.prepare(`
+        SELECT user_id, balance
+        FROM users
+        WHERE guild_id = ?
+        ORDER BY balance DESC
+        LIMIT 50
+      `).all(guildId);
+
+      if (!rows.length) {
+        return interaction.reply({
+          content: "No balances found.",
+          ephemeral: true
+        });
+      }
+
+      const text = rows.map((r, i) =>
+        `#${i + 1} | <@${r.user_id}> | ${r.balance.toLocaleString()} coins`
+      ).join("\n");
+
+      const chunks = chunkText(text);
+
+      await interaction.reply({
+        content: `📊 **All Balances - Page 1/${chunks.length}**\n\`\`\`\n${chunks[0].replace(/<@/g, "@").replace(/>/g, "")}\n\`\`\``,
+        ephemeral: true
+      });
+
+      for (let i = 1; i < chunks.length; i++) {
+        await interaction.followUp({
+          content: `📊 **All Balances - Page ${i + 1}/${chunks.length}**\n\`\`\`\n${chunks[i].replace(/<@/g, "@").replace(/>/g, "")}\n\`\`\``,
+          ephemeral: true
+        });
+      }
+
+      return;
+    }
+
+    if (command === "transactions") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
+      }
+
+      const rows = db.prepare(`
+        SELECT *
+        FROM transactions
+        WHERE guild_id = ?
+        ORDER BY id DESC
+        LIMIT 20
+      `).all(guildId);
+
+      if (!rows.length) {
+        return interaction.reply({
+          content: "No transactions found.",
+          ephemeral: true
+        });
+      }
+
+      const text = rows.map(t =>
+        `#${t.id} | ${t.type} | ${t.amount} | ${t.user_id} | ${t.reason || "-"} | ${formatDate(t.created_at)}`
+      ).join("\n");
+
+      return interaction.reply({
+        content: `📜 **Latest 20 Transactions**\n\`\`\`\n${text.slice(0, 1900)}\n\`\`\``,
+        ephemeral: true
+      });
     }
   } catch (err) {
     console.error("Interaction error:", err);
