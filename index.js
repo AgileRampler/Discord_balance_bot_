@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "2.4.0";
+const BOT_VERSION = "2.5.0";
 const MAX_BET = 1_000_000;
 
 db.pragma("journal_mode = WAL");
@@ -102,6 +102,30 @@ function logTransaction(guildId, userId, type, amount, reason = "") {
 function changeBalance(guildId, userId, amount, type, reason = "") {
   addBal(guildId, userId, amount);
   logTransaction(guildId, userId, type, amount, reason);
+}
+
+async function logToChannel(client, embed) {
+  try {
+    const channelId = process.env.TRANSACTION_LOG_CHANNEL;
+
+    if (!channelId) return;
+
+    const channel = await client.channels.fetch(channelId);
+
+    if (!channel || !channel.isTextBased()) return;
+
+    await channel.send({ embeds: [embed] });
+  } catch (err) {
+    console.error("Transaction channel log error:", err);
+  }
+}
+
+function makeLogEmbed(title, description, color = 0xff3b3b) {
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(description)
+    .setColor(color)
+    .setTimestamp();
 }
 
 function isCoinflipEnabled(guildId) {
@@ -399,6 +423,15 @@ async function handleCancelCoinflipButton(interaction) {
     });
   }
 
+  await logToChannel(
+    client,
+    makeLogEmbed(
+      "❌ Coinflip Cancelled",
+      `👤 **User:** <@${game.creator_id}>\n💰 **Refunded:** ${game.bet.toLocaleString()} coins\n🎮 **Game:** \`${gameId}\``,
+      0x808080
+    )
+  );
+
   const cancelledEmbed = new EmbedBuilder()
     .setTitle("🪙 Coinflip Cancelled")
     .setColor(0x808080)
@@ -512,6 +545,14 @@ async function handleJoinCoinflip(interaction) {
       ephemeral: true
     });
   }
+
+  await logToChannel(
+    client,
+    makeLogEmbed(
+      "🏆 Coinflip Result",
+      `🎲 **Result:** ${result.toUpperCase()}\n🥇 **Winner:** <@${winnerId}>\n💀 **Loser:** <@${loserId}>\n💰 **Pot:** ${pot.toLocaleString()} coins\n🎮 **Game:** \`${gameId}\``
+    )
+  );
 
   const oppositeChoice = game.choice === "heads" ? "tails" : "heads";
 
@@ -657,6 +698,14 @@ client.on("interactionCreate", async interaction => {
         `Added by ${interaction.user.tag}`
       );
 
+      await logToChannel(
+        client,
+        makeLogEmbed(
+          "➕ Admin Add Coins",
+          `👤 **User:** ${user}\n💰 **Amount:** +${amount.toLocaleString()} coins\n💳 **New Balance:** ${getBal(guildId, user.id).toLocaleString()} coins\n🛡️ **Admin:** ${interaction.user}`
+        )
+      );
+
       return interaction.reply(
         `✅ Added **${amount.toLocaleString()} coins** to ${user}.\n` +
         `💰 New balance: **${getBal(guildId, user.id).toLocaleString()} coins**`
@@ -676,9 +725,11 @@ client.on("interactionCreate", async interaction => {
       const balance = getBal(guildId, user.id);
 
       let removeAmount = 0;
+      let removeType = "NORMAL";
 
       if (input === "all") {
         removeAmount = balance;
+        removeType = "ALL";
       } else if (input.endsWith("%")) {
         const percent = parseFloat(input.replace("%", ""));
 
@@ -690,6 +741,7 @@ client.on("interactionCreate", async interaction => {
         }
 
         removeAmount = Math.floor((balance * percent) / 100);
+        removeType = `${percent}%`;
       } else {
         removeAmount = parseInt(input);
 
@@ -708,7 +760,18 @@ client.on("interactionCreate", async interaction => {
         user.id,
         -removeAmount,
         "ADMIN_REMOVE",
-        `Removed by ${interaction.user.tag}`
+        `Removed by ${interaction.user.tag} | Mode: ${removeType}`
+      );
+
+      const logTitle = removeType === "ALL" ? "☠️ Admin Removed ALL Coins" : "➖ Admin Remove Coins";
+
+      await logToChannel(
+        client,
+        makeLogEmbed(
+          logTitle,
+          `👤 **User:** ${user}\n💰 **Removed:** ${removeAmount.toLocaleString()} coins\n📌 **Mode:** ${removeType}\n💳 **Old Balance:** ${balance.toLocaleString()} coins\n💳 **New Balance:** ${getBal(guildId, user.id).toLocaleString()} coins\n🛡️ **Admin:** ${interaction.user}`,
+          removeType === "ALL" ? 0x000000 : 0xff3b3b
+        )
       );
 
       return interaction.reply(
@@ -729,6 +792,15 @@ client.on("interactionCreate", async interaction => {
       const enabled = status === "enable";
 
       setCoinflipEnabled(guildId, enabled);
+
+      await logToChannel(
+        client,
+        makeLogEmbed(
+          enabled ? "✅ Coinflip Enabled" : "🛑 Coinflip Disabled",
+          `🛡️ **Admin:** ${interaction.user}\n📌 **Status:** ${enabled ? "Enabled" : "Disabled"}`,
+          enabled ? 0x00ff00 : 0xff0000
+        )
+      );
 
       return interaction.reply(
         enabled
@@ -806,6 +878,14 @@ client.on("interactionCreate", async interaction => {
       });
 
       createTx();
+
+      await logToChannel(
+        client,
+        makeLogEmbed(
+          "🪙 Coinflip Created",
+          `👤 **Creator:** ${creator}\n🎯 **Choice:** ${choice.toUpperCase()}\n💰 **Bet Locked:** ${bet.toLocaleString()} coins\n🎮 **Game:** \`${gameId}\``
+        )
+      );
 
       const embed = new EmbedBuilder()
         .setTitle("🪙 Coinflip PvP")
