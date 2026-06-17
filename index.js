@@ -15,10 +15,15 @@ const {
 } = require("discord.js");
 
 const Database = require("better-sqlite3");
-const db = new Database(process.env.DB_PATH || "economy.db");
 
-const BOT_VERSION = "2.1.0";
-const MAX_BET = 100_000_000;
+const dbPath = process.env.DB_PATH || "economy.db";
+console.log("Using database:", dbPath);
+const db = new Database(dbPath);
+
+const BOT_VERSION = "2.2.0";
+const MAX_BET = 1_000_000;
+
+db.pragma("journal_mode = WAL");
 
 db.prepare(`
 CREATE TABLE IF NOT EXISTS users (
@@ -50,6 +55,18 @@ CREATE TABLE IF NOT EXISTS coinflips (
 )
 `).run();
 
+db.prepare(`
+CREATE TABLE IF NOT EXISTS transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  reason TEXT,
+  created_at INTEGER NOT NULL
+)
+`).run();
+
 function getBal(guildId, userId) {
   const row = db.prepare(
     "SELECT balance FROM users WHERE guild_id = ? AND user_id = ?"
@@ -67,9 +84,23 @@ function getBal(guildId, userId) {
 
 function addBal(guildId, userId, amount) {
   getBal(guildId, userId);
+
   db.prepare(
     "UPDATE users SET balance = balance + ? WHERE guild_id = ? AND user_id = ?"
   ).run(amount, guildId, userId);
+}
+
+function logTransaction(guildId, userId, type, amount, reason = "") {
+  db.prepare(`
+    INSERT INTO transactions
+    (guild_id, user_id, type, amount, reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(guildId, userId, type, amount, reason, Date.now());
+}
+
+function changeBalance(guildId, userId, amount, type, reason = "") {
+  addBal(guildId, userId, amount);
+  logTransaction(guildId, userId, type, amount, reason);
 }
 
 function isCoinflipEnabled(guildId) {
@@ -100,6 +131,20 @@ function makeGameId() {
   return `${Date.now()}_${Math.floor(Math.random() * 999999)}`;
 }
 
+function formatDate(timestamp) {
+  return new Date(timestamp).toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata"
+  });
+}
+
+function safeReply(interaction, data) {
+  if (interaction.replied || interaction.deferred) {
+    return interaction.followUp(data).catch(() => {});
+  }
+
+  return interaction.reply(data).catch(() => {});
+}
+
 const commands = [
   new SlashCommandBuilder()
     .setName("version")
@@ -119,6 +164,13 @@ const commands = [
   new SlashCommandBuilder()
     .setName("leaderboard")
     .setDescription("Show balance leaderboard"),
+
+  new SlashCommandBuilder()
+    .setName("history")
+    .setDescription("Show last transactions")
+    .addUserOption(o =>
+      o.setName("user").setDescription("User to check").setRequired(false)
+    ),
 
   new SlashCommandBuilder()
     .setName("addcoins")
@@ -184,7 +236,10 @@ const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 async function registerCommands() {
   try {
     console.log("🧹 Clearing global commands...");
-    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [] });
+    await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: [] }
+    );
 
     console.log("🧹 Clearing guild commands...");
     await rest.put(
@@ -200,7 +255,7 @@ async function registerCommands() {
 
     console.log("✅ Commands refreshed.");
   } catch (err) {
-    console.error(err);
+    console.error("Command register error:", err);
   }
 }
 
@@ -224,9 +279,45 @@ client.once("clientReady", () => {
   });
 });
 
+function expireOldCoinflips() {
+  const now = Date.now();
+  const expireBefore = now - 10 * 60 * 1000;
+
+  const oldGames = db.prepare(`
+    SELECT *
+    FROM coinflips
+    WHERE status = 'open'
+    AND created_at < ?
+  `).all(expireBefore);
+
+  const expireTx = db.transaction((games) => {
+    for (const game of games) {
+      db.prepare(
+        "UPDATE coinflips SET status = 'expired' WHERE game_id = ? AND status = 'open'"
+      ).run(game.game_id);
+
+      changeBalance(
+        game.guild_id,
+        game.creator_id,
+        game.bet,
+        "COINFLIP_REFUND",
+        `Coinflip expired refund | Game: ${game.game_id}`
+      );
+    }
+  });
+
+  if (oldGames.length > 0) {
+    expireTx(oldGames);
+    console.log(`Refunded ${oldGames.length} expired coinflip(s).`);
+  }
+}
+
+setInterval(expireOldCoinflips, 60_000);
+
 async function handleJoinCoinflip(interaction) {
   const guildId = interaction.guild.id;
   const gameId = interaction.customId.replace("join_coinflip:", "");
+  const opponent = interaction.user;
 
   const game = db.prepare(
     "SELECT * FROM coinflips WHERE game_id = ?"
@@ -245,8 +336,6 @@ async function handleJoinCoinflip(interaction) {
       ephemeral: true
     });
   }
-
-  const opponent = interaction.user;
 
   if (opponent.id === game.creator_id) {
     return interaction.reply({
@@ -269,19 +358,58 @@ async function handleJoinCoinflip(interaction) {
     });
   }
 
-  addBal(guildId, opponent.id, -game.bet);
-
   const result = Math.random() < 0.5 ? "heads" : "tails";
   const creatorWon = result === game.choice;
   const winnerId = creatorWon ? game.creator_id : opponent.id;
   const loserId = creatorWon ? opponent.id : game.creator_id;
   const pot = game.bet * 2;
 
-  addBal(guildId, winnerId, pot);
+  const finishCoinflipTx = db.transaction(() => {
+    const freshGame = db.prepare(
+      "SELECT * FROM coinflips WHERE game_id = ?"
+    ).get(gameId);
 
-  db.prepare(
-    "UPDATE coinflips SET status = 'finished' WHERE game_id = ?"
-  ).run(gameId);
+    if (!freshGame || freshGame.status !== "open") {
+      throw new Error("Coinflip already finished/cancelled.");
+    }
+
+    changeBalance(
+      guildId,
+      opponent.id,
+      -game.bet,
+      "COINFLIP_JOIN_LOCK",
+      `Joined coinflip | Game: ${gameId}`
+    );
+
+    changeBalance(
+      guildId,
+      winnerId,
+      pot,
+      "COINFLIP_WIN",
+      `Won coinflip vs <@${loserId}> | Game: ${gameId}`
+    );
+
+    logTransaction(
+      guildId,
+      loserId,
+      "COINFLIP_LOSS",
+      0,
+      `Lost coinflip vs <@${winnerId}> | Game: ${gameId}`
+    );
+
+    db.prepare(
+      "UPDATE coinflips SET status = 'finished' WHERE game_id = ?"
+    ).run(gameId);
+  });
+
+  try {
+    finishCoinflipTx();
+  } catch (err) {
+    return interaction.reply({
+      content: "❌ This coinflip was already handled or cancelled.",
+      ephemeral: true
+    });
+  }
 
   const oppositeChoice = game.choice === "heads" ? "tails" : "heads";
 
@@ -364,19 +492,63 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({ embeds: [embed] });
     }
 
+    if (command === "history") {
+      const user = interaction.options.getUser("user") || interaction.user;
+
+      const rows = db.prepare(`
+        SELECT *
+        FROM transactions
+        WHERE guild_id = ?
+        AND user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 10
+      `).all(guildId, user.id);
+
+      if (!rows.length) {
+        return interaction.reply({
+          content: "No transaction history found.",
+          ephemeral: true
+        });
+      }
+
+      const text = rows.map(t => {
+        const sign = t.amount > 0 ? "+" : "";
+        return `**${t.type}** | ${sign}${t.amount.toLocaleString()} | ${t.reason || "-"}\n\`${formatDate(t.created_at)}\``;
+      }).join("\n\n");
+
+      const embed = new EmbedBuilder()
+        .setTitle(`📜 ${user.username} Transaction History`)
+        .setDescription(text)
+        .setColor(0xff3b3b);
+
+      return interaction.reply({ embeds: [embed] });
+    }
+
     if (command === "addcoins") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
-        return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
       }
 
       const user = interaction.options.getUser("user");
       const amount = interaction.options.getInteger("amount");
 
       if (amount <= 0) {
-        return interaction.reply({ content: "❌ Amount must be more than 0.", ephemeral: true });
+        return interaction.reply({
+          content: "❌ Amount must be more than 0.",
+          ephemeral: true
+        });
       }
 
-      addBal(guildId, user.id, amount);
+      changeBalance(
+        guildId,
+        user.id,
+        amount,
+        "ADMIN_ADD",
+        `Added by ${interaction.user.tag}`
+      );
 
       return interaction.reply(
         `✅ Added **${amount.toLocaleString()} coins** to ${user}.\n` +
@@ -386,7 +558,10 @@ client.on("interactionCreate", async interaction => {
 
     if (command === "removecoins") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
-        return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
       }
 
       const user = interaction.options.getUser("user");
@@ -421,7 +596,13 @@ client.on("interactionCreate", async interaction => {
         removeAmount = Math.min(balance, removeAmount);
       }
 
-      addBal(guildId, user.id, -removeAmount);
+      changeBalance(
+        guildId,
+        user.id,
+        -removeAmount,
+        "ADMIN_REMOVE",
+        `Removed by ${interaction.user.tag}`
+      );
 
       return interaction.reply(
         `✅ Removed **${removeAmount.toLocaleString()} coins** from ${user}.\n` +
@@ -431,7 +612,10 @@ client.on("interactionCreate", async interaction => {
 
     if (command === "coinflipadmin") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
-        return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
       }
 
       const status = interaction.options.getString("status");
@@ -458,11 +642,36 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      db.prepare(
-        "UPDATE coinflips SET status = 'cancelled' WHERE game_id = ?"
-      ).run(game.game_id);
+      const cancelTx = db.transaction(() => {
+        const freshGame = db.prepare(
+          "SELECT * FROM coinflips WHERE game_id = ?"
+        ).get(game.game_id);
 
-      addBal(guildId, interaction.user.id, game.bet);
+        if (!freshGame || freshGame.status !== "open") {
+          throw new Error("Coinflip already finished/cancelled.");
+        }
+
+        db.prepare(
+          "UPDATE coinflips SET status = 'cancelled' WHERE game_id = ?"
+        ).run(game.game_id);
+
+        changeBalance(
+          guildId,
+          interaction.user.id,
+          game.bet,
+          "COINFLIP_REFUND",
+          `Coinflip cancelled | Game: ${game.game_id}`
+        );
+      });
+
+      try {
+        cancelTx();
+      } catch (err) {
+        return interaction.reply({
+          content: "❌ This coinflip is already finished/cancelled.",
+          ephemeral: true
+        });
+      }
 
       return interaction.reply(
         `✅ Your coinflip was cancelled.\n💰 Refunded **${game.bet.toLocaleString()} coins**.`
@@ -482,7 +691,10 @@ client.on("interactionCreate", async interaction => {
       const bet = interaction.options.getInteger("bet");
 
       if (bet <= 0) {
-        return interaction.reply({ content: "❌ Bet must be more than 0.", ephemeral: true });
+        return interaction.reply({
+          content: "❌ Bet must be more than 0.",
+          ephemeral: true
+        });
       }
 
       if (bet > MAX_BET) {
@@ -492,19 +704,49 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      if (getBal(guildId, creator.id) < bet) {
-        return interaction.reply({ content: "❌ You do not have enough coins.", ephemeral: true });
+      const existing = db.prepare(`
+        SELECT *
+        FROM coinflips
+        WHERE guild_id = ?
+        AND creator_id = ?
+        AND status = 'open'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(guildId, creator.id);
+
+      if (existing) {
+        return interaction.reply({
+          content: "❌ You already have an active coinflip. Use `/cancelcoinflip` first.",
+          ephemeral: true
+        });
       }
 
-      addBal(guildId, creator.id, -bet);
+      if (getBal(guildId, creator.id) < bet) {
+        return interaction.reply({
+          content: "❌ You do not have enough coins.",
+          ephemeral: true
+        });
+      }
 
       const gameId = makeGameId();
 
-      db.prepare(`
-        INSERT INTO coinflips
-        (game_id, guild_id, channel_id, creator_id, choice, bet, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'open', ?)
-      `).run(gameId, guildId, interaction.channel.id, creator.id, choice, bet, Date.now());
+      const createTx = db.transaction(() => {
+        changeBalance(
+          guildId,
+          creator.id,
+          -bet,
+          "COINFLIP_CREATE_LOCK",
+          `Coinflip created | Game: ${gameId}`
+        );
+
+        db.prepare(`
+          INSERT INTO coinflips
+          (game_id, guild_id, channel_id, creator_id, choice, bet, status, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'open', ?)
+        `).run(gameId, guildId, interaction.channel.id, creator.id, choice, bet, Date.now());
+      });
+
+      createTx();
 
       const embed = new EmbedBuilder()
         .setTitle("🪙 Coinflip PvP")
@@ -541,13 +783,19 @@ client.on("interactionCreate", async interaction => {
   } catch (err) {
     console.error("Interaction error:", err);
 
-    if (!interaction.replied && !interaction.deferred) {
-      return interaction.reply({
-        content: "❌ Something went wrong. Please tell an admin to check bot logs.",
-        ephemeral: true
-      });
-    }
+    return safeReply(interaction, {
+      content: "❌ Something went wrong. Please tell an admin to check bot logs.",
+      ephemeral: true
+    });
   }
+});
+
+process.on("uncaughtException", err => {
+  console.error("Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", err => {
+  console.error("Unhandled Rejection:", err);
 });
 
 client.login(process.env.TOKEN);
