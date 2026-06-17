@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "2.3.0";
+const BOT_VERSION = "2.4.0";
 const MAX_BET = 1_000_000;
 
 db.pragma("journal_mode = WAL");
@@ -67,20 +67,6 @@ CREATE TABLE IF NOT EXISTS transactions (
   created_at INTEGER NOT NULL
 )
 `).run();
-
-const fs = require("fs");
-
-setInterval(() => {
-  const date = new Date().toISOString().split("T")[0];
-
-  fs.copyFileSync(
-    "/data/economy.db",
-    `/data/backup-${date}.db`
-  );
-
-  console.log("Database backup created");
-}, 24 * 60 * 60 * 1000);
-
 
 function getBal(guildId, userId) {
   const row = db.prepare(
@@ -247,10 +233,6 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
-    .setName("cancelcoinflip")
-    .setDescription("Cancel your open coinflip and refund your bet"),
-
-  new SlashCommandBuilder()
     .setName("coinflipadmin")
     .setDescription("Admin only: enable or disable coinflip")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -362,6 +344,77 @@ function expireOldCoinflips() {
 }
 
 setInterval(expireOldCoinflips, 60_000);
+
+async function handleCancelCoinflipButton(interaction) {
+  const guildId = interaction.guild.id;
+  const gameId = interaction.customId.replace("cancel_coinflip:", "");
+  const user = interaction.user;
+
+  const game = db.prepare(
+    "SELECT * FROM coinflips WHERE game_id = ?"
+  ).get(gameId);
+
+  if (!game || game.status !== "open") {
+    return interaction.reply({
+      content: "❌ This coinflip is no longer active.",
+      ephemeral: true
+    });
+  }
+
+  if (user.id !== game.creator_id) {
+    return interaction.reply({
+      content: "❌ Only the coinflip creator can cancel this game.",
+      ephemeral: true
+    });
+  }
+
+  const cancelTx = db.transaction(() => {
+    const freshGame = db.prepare(
+      "SELECT * FROM coinflips WHERE game_id = ?"
+    ).get(gameId);
+
+    if (!freshGame || freshGame.status !== "open") {
+      throw new Error("Coinflip already finished/cancelled.");
+    }
+
+    db.prepare(
+      "UPDATE coinflips SET status = 'cancelled' WHERE game_id = ?"
+    ).run(gameId);
+
+    changeBalance(
+      guildId,
+      user.id,
+      game.bet,
+      "COINFLIP_REFUND",
+      `Coinflip cancelled by button | Game: ${gameId}`
+    );
+  });
+
+  try {
+    cancelTx();
+  } catch (err) {
+    return interaction.reply({
+      content: "❌ This coinflip is already finished/cancelled.",
+      ephemeral: true
+    });
+  }
+
+  const cancelledEmbed = new EmbedBuilder()
+    .setTitle("🪙 Coinflip Cancelled")
+    .setColor(0x808080)
+    .setDescription(
+      `**Creator:** <@${game.creator_id}>\n` +
+      `**Choice:** ${game.choice.toUpperCase()}\n` +
+      `**Bet:** ${game.bet.toLocaleString()} coins\n\n` +
+      `❌ Cancelled by creator.\n` +
+      `💰 Bet refunded.`
+    );
+
+  return interaction.update({
+    embeds: [cancelledEmbed],
+    components: []
+  });
+}
 
 async function handleJoinCoinflip(interaction) {
   const guildId = interaction.guild.id;
@@ -486,6 +539,11 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId.startsWith("join_coinflip:")) {
         return handleJoinCoinflip(interaction);
       }
+
+      if (interaction.customId.startsWith("cancel_coinflip:")) {
+        return handleCancelCoinflipButton(interaction);
+      }
+
       return;
     }
 
@@ -679,54 +737,6 @@ client.on("interactionCreate", async interaction => {
       );
     }
 
-    if (command === "cancelcoinflip") {
-      const game = db.prepare(
-        "SELECT * FROM coinflips WHERE guild_id = ? AND creator_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1"
-      ).get(guildId, interaction.user.id);
-
-      if (!game) {
-        return interaction.reply({
-          content: "❌ You have no open coinflip to cancel.",
-          ephemeral: true
-        });
-      }
-
-      const cancelTx = db.transaction(() => {
-        const freshGame = db.prepare(
-          "SELECT * FROM coinflips WHERE game_id = ?"
-        ).get(game.game_id);
-
-        if (!freshGame || freshGame.status !== "open") {
-          throw new Error("Coinflip already finished/cancelled.");
-        }
-
-        db.prepare(
-          "UPDATE coinflips SET status = 'cancelled' WHERE game_id = ?"
-        ).run(game.game_id);
-
-        changeBalance(
-          guildId,
-          interaction.user.id,
-          game.bet,
-          "COINFLIP_REFUND",
-          `Coinflip cancelled | Game: ${game.game_id}`
-        );
-      });
-
-      try {
-        cancelTx();
-      } catch (err) {
-        return interaction.reply({
-          content: "❌ This coinflip is already finished/cancelled.",
-          ephemeral: true
-        });
-      }
-
-      return interaction.reply(
-        `✅ Your coinflip was cancelled.\n💰 Refunded **${game.bet.toLocaleString()} coins**.`
-      );
-    }
-
     if (command === "coinflip") {
       if (!isCoinflipEnabled(guildId)) {
         return interaction.reply({
@@ -765,7 +775,7 @@ client.on("interactionCreate", async interaction => {
 
       if (existing) {
         return interaction.reply({
-          content: "❌ You already have an active coinflip. Use `/cancelcoinflip` first.",
+          content: "❌ You already have an active coinflip. Cancel the old one using the red cancel button.",
           ephemeral: true
         });
       }
@@ -806,14 +816,19 @@ client.on("interactionCreate", async interaction => {
           `**Bet:** ${bet.toLocaleString()} coins\n\n` +
           `💰 Creator's bet is locked.\n` +
           `Waiting for opponent...\n\n` +
-          `Use **/cancelcoinflip** to cancel and refund.`
+          `Creator can use the red cancel button to refund.`
         );
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`join_coinflip:${gameId}`)
           .setLabel("🪙 Join Coinflip")
-          .setStyle(ButtonStyle.Success)
+          .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+          .setCustomId(`cancel_coinflip:${gameId}`)
+          .setLabel("Cancel")
+          .setStyle(ButtonStyle.Danger)
       );
 
       await interaction.reply({
