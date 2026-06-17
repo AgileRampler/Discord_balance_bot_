@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "2.6.0";
+const BOT_VERSION = "2.7.0";
 const MAX_BET = 1_000_000;
 
 db.pragma("journal_mode = WAL");
@@ -138,6 +138,15 @@ async function logToChannel(client, embed, components = []) {
   }
 }
 
+async function notifyUser(client, userId, message) {
+  try {
+    const user = await client.users.fetch(userId);
+    await user.send(message);
+  } catch (err) {
+    console.log(`Could not DM user ${userId}.`);
+  }
+}
+
 function makeLogEmbed(title, description, color = 0xff3b3b) {
   return new EmbedBuilder()
     .setTitle(title)
@@ -178,35 +187,6 @@ function makeWithdrawId() {
   return `WD-${Date.now()}-${Math.floor(Math.random() * 999999)}`;
 }
 
-function parseAmountInput(input, balance) {
-  const raw = String(input).toLowerCase().trim();
-
-  if (raw === "all") {
-    return { amount: balance, mode: "ALL" };
-  }
-
-  if (raw.endsWith("%")) {
-    const percent = parseFloat(raw.replace("%", ""));
-
-    if (isNaN(percent) || percent <= 0 || percent > 100) {
-      return { error: "Percentage must be between 1% and 100%. Example: `25%`" };
-    }
-
-    return {
-      amount: Math.floor((balance * percent) / 100),
-      mode: `${percent}%`
-    };
-  }
-
-  const amount = parseInt(raw.replace(/,/g, ""));
-
-  if (isNaN(amount) || amount <= 0) {
-    return { error: "Use a number, `all`, or percentage like `10%`." };
-  }
-
-  return { amount, mode: "AMOUNT" };
-}
-
 function formatDate(timestamp) {
   return new Date(timestamp).toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata"
@@ -238,6 +218,54 @@ function chunkText(text, maxLength = 1900) {
 
   if (current) chunks.push(current);
   return chunks;
+}
+
+function parseAmountInput(input, balance) {
+  const raw = String(input).toLowerCase().trim();
+
+  if (raw === "all") {
+    return { amount: balance, mode: "ALL" };
+  }
+
+  if (raw.endsWith("%")) {
+    const percent = parseFloat(raw.replace("%", ""));
+
+    if (isNaN(percent) || percent <= 0 || percent > 100) {
+      return { error: "Percentage must be between 1% and 100%. Example: `25%`" };
+    }
+
+    return {
+      amount: Math.floor((balance * percent) / 100),
+      mode: `${percent}%`
+    };
+  }
+
+  const amount = parseInt(raw.replace(/,/g, ""));
+
+  if (isNaN(amount) || amount <= 0) {
+    return { error: "Use a number, `all`, or percentage like `10%`." };
+  }
+
+  return { amount, mode: "AMOUNT" };
+}
+
+function withdrawalButtons(withdrawId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`withdraw_approve:${withdrawId}`)
+      .setLabel("Approve")
+      .setStyle(ButtonStyle.Success),
+
+    new ButtonBuilder()
+      .setCustomId(`withdraw_deny:${withdrawId}`)
+      .setLabel("Deny")
+      .setStyle(ButtonStyle.Danger),
+
+    new ButtonBuilder()
+      .setCustomId(`withdraw_cancel:${withdrawId}`)
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Secondary)
+  );
 }
 
 const commands = [
@@ -387,7 +415,7 @@ client.once("clientReady", () => {
     status: "online",
     activities: [
       {
-        name: "/coinflip | /withdraw",
+        name: "/withdraw | /coinflip",
         type: ActivityType.Watching
       }
     ]
@@ -477,10 +505,24 @@ async function handleWithdrawApprove(interaction) {
     0x00ff00
   );
 
-  return interaction.update({
+  await interaction.update({
     embeds: [embed],
     components: []
   });
+
+  await interaction.channel.send(
+    `✅ <@${request.user_id}> your withdrawal of **${request.amount.toLocaleString()} coins** has been **approved** by ${interaction.user}.`
+  ).catch(() => {});
+
+  await notifyUser(
+    client,
+    request.user_id,
+    `✅ Your withdrawal was approved.\nAmount: ${request.amount.toLocaleString()} coins\nApproved by: ${interaction.user.tag}`
+  );
+
+  await logToChannel(client, embed);
+
+  return;
 }
 
 async function handleWithdrawDeny(interaction) {
@@ -526,20 +568,116 @@ async function handleWithdrawDeny(interaction) {
   const newBalance = getBal(guildId, request.user_id);
 
   const embed = makeLogEmbed(
-    "❌ Withdrawal Denied",
+    "❌ Withdrawal Rejected",
     `**ID:** \`${withdrawId}\`\n` +
     `👤 **User:** <@${request.user_id}>\n` +
     `💰 **Refunded:** ${request.amount.toLocaleString()} coins\n` +
     `💳 **Current Balance:** ${newBalance.toLocaleString()} coins\n\n` +
-    `Withdrawal has been denied by Admin and refunded.\n` +
-    `🛡️ **Denied By:** ${interaction.user}`,
+    `Withdrawal has been rejected by Admin and refunded.\n` +
+    `🛡️ **Rejected By:** ${interaction.user}`,
     0xff0000
   );
 
-  return interaction.update({
+  await interaction.update({
     embeds: [embed],
     components: []
   });
+
+  await interaction.channel.send(
+    `❌ <@${request.user_id}> your withdrawal of **${request.amount.toLocaleString()} coins** was **rejected** by ${interaction.user}. The amount has been refunded.`
+  ).catch(() => {});
+
+  await notifyUser(
+    client,
+    request.user_id,
+    `❌ Your withdrawal was rejected and refunded.\nAmount: ${request.amount.toLocaleString()} coins\nRejected by: ${interaction.user.tag}`
+  );
+
+  await logToChannel(client, embed);
+
+  return;
+}
+
+async function handleWithdrawCancel(interaction) {
+  const guildId = interaction.guild.id;
+  const withdrawId = interaction.customId.replace("withdraw_cancel:", "");
+  const user = interaction.user;
+
+  const request = db.prepare(
+    "SELECT * FROM withdrawals WHERE withdraw_id = ?"
+  ).get(withdrawId);
+
+  if (!request || request.status !== "pending") {
+    return interaction.reply({
+      content: "❌ This withdrawal is no longer pending.",
+      ephemeral: true
+    });
+  }
+
+  if (user.id !== request.user_id) {
+    return interaction.reply({
+      content: "❌ Only the withdrawal requester can cancel this request.",
+      ephemeral: true
+    });
+  }
+
+  const cancelTx = db.transaction(() => {
+    const fresh = db.prepare(
+      "SELECT * FROM withdrawals WHERE withdraw_id = ?"
+    ).get(withdrawId);
+
+    if (!fresh || fresh.status !== "pending") {
+      throw new Error("Withdrawal already handled.");
+    }
+
+    db.prepare(`
+      UPDATE withdrawals
+      SET status = 'cancelled', updated_at = ?
+      WHERE withdraw_id = ? AND status = 'pending'
+    `).run(Date.now(), withdrawId);
+
+    changeBalance(
+      guildId,
+      request.user_id,
+      request.amount,
+      "WITHDRAW_CANCEL_REFUND",
+      `Withdrawal cancelled by user | Withdraw: ${withdrawId}`
+    );
+  });
+
+  try {
+    cancelTx();
+  } catch (err) {
+    return interaction.reply({
+      content: "❌ This withdrawal is already handled.",
+      ephemeral: true
+    });
+  }
+
+  const newBalance = getBal(guildId, request.user_id);
+
+  const embed = makeLogEmbed(
+    "🚫 Withdrawal Cancelled",
+    `**ID:** \`${withdrawId}\`\n` +
+    `👤 **User:** <@${request.user_id}>\n` +
+    `💰 **Refunded:** ${request.amount.toLocaleString()} coins\n` +
+    `💳 **Current Balance:** ${newBalance.toLocaleString()} coins\n\n` +
+    `Withdrawal was cancelled by the requester.`,
+    0x808080
+  );
+
+  await interaction.update({
+    embeds: [embed],
+    components: []
+  });
+
+  await interaction.channel.send(
+    `🚫 <@${request.user_id}> cancelled their withdrawal request. **${request.amount.toLocaleString()} coins** refunded.`
+  ).catch(() => {});
+
+  await logToChannel(client, embed);
+
+  return;
 }
 
 async function handleCancelCoinflipButton(interaction) {
@@ -766,6 +904,10 @@ client.on("interactionCreate", async interaction => {
         return handleWithdrawDeny(interaction);
       }
 
+      if (interaction.customId.startsWith("withdraw_cancel:")) {
+        return handleWithdrawCancel(interaction);
+      }
+
       return;
     }
 
@@ -895,7 +1037,7 @@ client.on("interactionCreate", async interaction => {
 
       if (pending) {
         return interaction.reply({
-          content: "❌ You already have a pending withdrawal. Wait for admin approval/denial first.",
+          content: "❌ You already have a pending withdrawal. Wait for admin approval, rejection, or cancel it first.",
           ephemeral: true
         });
       }
@@ -938,34 +1080,34 @@ client.on("interactionCreate", async interaction => {
         `💰 **Amount:** ${amount.toLocaleString()} coins\n` +
         `📌 **Mode:** ${parsed.mode}\n` +
         `💳 **Balance Before:** ${balanceBefore.toLocaleString()} coins\n` +
-        `💳 **Balance After:** ${balanceAfter.toLocaleString()} coins\n\n` +
-        `⏳ Waiting for admin verification.`,
+        `💳 **Balance After Lock:** ${balanceAfter.toLocaleString()} coins\n\n` +
+        `⏳ Waiting for admin approval.\n` +
+        `Admins can approve or deny below.\n` +
+        `Requester can cancel below.`,
         0xffcc00
       );
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`withdraw_approve:${withdrawId}`)
-          .setLabel("Approve")
-          .setStyle(ButtonStyle.Success),
+      const msg = await interaction.channel.send({
+        embeds: [requestEmbed],
+        components: [withdrawalButtons(withdrawId)]
+      });
 
-        new ButtonBuilder()
-          .setCustomId(`withdraw_deny:${withdrawId}`)
-          .setLabel("Deny")
-          .setStyle(ButtonStyle.Danger)
+      db.prepare(
+        "UPDATE withdrawals SET message_id = ? WHERE withdraw_id = ?"
+      ).run(msg.id, withdrawId);
+
+      await logToChannel(
+        client,
+        makeLogEmbed(
+          "💸 Withdrawal Request Created",
+          `👤 **User:** ${user}\n💰 **Amount:** ${amount.toLocaleString()} coins\n💳 **Balance After Lock:** ${balanceAfter.toLocaleString()} coins\n🧵 **Channel/Post:** <#${interaction.channel.id}>\n**ID:** \`${withdrawId}\``,
+          0xffcc00
+        )
       );
-
-      const logMsg = await logToChannel(client, requestEmbed, [row]);
-
-      if (logMsg) {
-        db.prepare(
-          "UPDATE withdrawals SET message_id = ? WHERE withdraw_id = ?"
-        ).run(logMsg.id, withdrawId);
-      }
 
       return interaction.reply({
         content:
-          `✅ Withdrawal request created.\n` +
+          `✅ Withdrawal request posted in this forum post/channel.\n` +
           `💰 Amount: **${amount.toLocaleString()} coins**\n` +
           `💳 Balance After Lock: **${balanceAfter.toLocaleString()} coins**\n` +
           `⏳ Waiting for admin approval.`,
@@ -1025,36 +1167,17 @@ client.on("interactionCreate", async interaction => {
       const input = interaction.options.getString("amount").toLowerCase().trim();
       const balance = getBal(guildId, user.id);
 
-      let removeAmount = 0;
-      let removeType = "NORMAL";
+      const parsed = parseAmountInput(input, balance);
 
-      if (input === "all") {
-        removeAmount = balance;
-        removeType = "ALL";
-      } else if (input.endsWith("%")) {
-        const percent = parseFloat(input.replace("%", ""));
-
-        if (isNaN(percent) || percent <= 0 || percent > 100) {
-          return interaction.reply({
-            content: "❌ Percentage must be between 1% and 100%. Example: `25%`",
-            ephemeral: true
-          });
-        }
-
-        removeAmount = Math.floor((balance * percent) / 100);
-        removeType = `${percent}%`;
-      } else {
-        removeAmount = parseInt(input);
-
-        if (isNaN(removeAmount) || removeAmount <= 0) {
-          return interaction.reply({
-            content: "❌ Use a number, `all`, or percentage like `10%`.",
-            ephemeral: true
-          });
-        }
-
-        removeAmount = Math.min(balance, removeAmount);
+      if (parsed.error) {
+        return interaction.reply({
+          content: `❌ ${parsed.error}`,
+          ephemeral: true
+        });
       }
+
+      let removeAmount = Math.min(balance, parsed.amount);
+      let removeType = parsed.mode;
 
       changeBalance(
         guildId,
@@ -1268,6 +1391,7 @@ client.on("interactionCreate", async interaction => {
           `📜 **Transactions:** ${tx.count}\n` +
           `🪙 **Open Coinflips:** ${openFlips.count}\n` +
           `✅ **Finished Coinflips:** ${finishedFlips.count}\n` +
+          `💸 **Pending Withdrawals:** ${pendingWithdrawals.count}\n` +
           `💰 **Total Coins:** ${Number(totalCoins.total).toLocaleString()}\n` +
           `📁 **Database:** \`${dbPath}\`\n` +
           `📌 **SQLite File:** \`${dbFile[0]?.file || "unknown"}\``
