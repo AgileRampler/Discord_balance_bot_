@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "2.5.0";
+const BOT_VERSION = "2.6.0";
 const MAX_BET = 1_000_000;
 
 db.pragma("journal_mode = WAL");
@@ -53,6 +53,23 @@ CREATE TABLE IF NOT EXISTS coinflips (
   bet INTEGER NOT NULL,
   status TEXT DEFAULT 'open',
   created_at INTEGER NOT NULL
+)
+`).run();
+
+db.prepare(`
+CREATE TABLE IF NOT EXISTS withdrawals (
+  withdraw_id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT,
+  user_id TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  balance_before INTEGER NOT NULL,
+  balance_after INTEGER NOT NULL,
+  status TEXT DEFAULT 'pending',
+  admin_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
 )
 `).run();
 
@@ -104,19 +121,20 @@ function changeBalance(guildId, userId, amount, type, reason = "") {
   logTransaction(guildId, userId, type, amount, reason);
 }
 
-async function logToChannel(client, embed) {
+async function logToChannel(client, embed, components = []) {
   try {
     const channelId = process.env.TRANSACTION_LOG_CHANNEL;
 
-    if (!channelId) return;
+    if (!channelId) return null;
 
     const channel = await client.channels.fetch(channelId);
 
-    if (!channel || !channel.isTextBased()) return;
+    if (!channel || !channel.isTextBased()) return null;
 
-    await channel.send({ embeds: [embed] });
+    return await channel.send({ embeds: [embed], components });
   } catch (err) {
     console.error("Transaction channel log error:", err);
+    return null;
   }
 }
 
@@ -154,6 +172,39 @@ function setCoinflipEnabled(guildId, enabled) {
 
 function makeGameId() {
   return `${Date.now()}_${Math.floor(Math.random() * 999999)}`;
+}
+
+function makeWithdrawId() {
+  return `WD-${Date.now()}-${Math.floor(Math.random() * 999999)}`;
+}
+
+function parseAmountInput(input, balance) {
+  const raw = String(input).toLowerCase().trim();
+
+  if (raw === "all") {
+    return { amount: balance, mode: "ALL" };
+  }
+
+  if (raw.endsWith("%")) {
+    const percent = parseFloat(raw.replace("%", ""));
+
+    if (isNaN(percent) || percent <= 0 || percent > 100) {
+      return { error: "Percentage must be between 1% and 100%. Example: `25%`" };
+    }
+
+    return {
+      amount: Math.floor((balance * percent) / 100),
+      mode: `${percent}%`
+    };
+  }
+
+  const amount = parseInt(raw.replace(/,/g, ""));
+
+  if (isNaN(amount) || amount <= 0) {
+    return { error: "Use a number, `all`, or percentage like `10%`." };
+  }
+
+  return { amount, mode: "AMOUNT" };
 }
 
 function formatDate(timestamp) {
@@ -214,6 +265,15 @@ const commands = [
     .setDescription("Show last transactions")
     .addUserOption(o =>
       o.setName("user").setDescription("User to check").setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("withdraw")
+    .setDescription("Request a withdrawal")
+    .addStringOption(o =>
+      o.setName("amount")
+        .setDescription("Amount, all, or percentage like 25%")
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -327,7 +387,7 @@ client.once("clientReady", () => {
     status: "online",
     activities: [
       {
-        name: "/coinflip | /balance",
+        name: "/coinflip | /withdraw",
         type: ActivityType.Watching
       }
     ]
@@ -368,6 +428,119 @@ function expireOldCoinflips() {
 }
 
 setInterval(expireOldCoinflips, 60_000);
+
+async function handleWithdrawApprove(interaction) {
+  const guildId = interaction.guild.id;
+  const withdrawId = interaction.customId.replace("withdraw_approve:", "");
+
+  if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      content: "❌ Only admins can approve withdrawals.",
+      ephemeral: true
+    });
+  }
+
+  const request = db.prepare(
+    "SELECT * FROM withdrawals WHERE withdraw_id = ?"
+  ).get(withdrawId);
+
+  if (!request || request.status !== "pending") {
+    return interaction.reply({
+      content: "❌ This withdrawal is no longer pending.",
+      ephemeral: true
+    });
+  }
+
+  db.prepare(`
+    UPDATE withdrawals
+    SET status = 'approved', admin_id = ?, updated_at = ?
+    WHERE withdraw_id = ? AND status = 'pending'
+  `).run(interaction.user.id, Date.now(), withdrawId);
+
+  logTransaction(
+    guildId,
+    request.user_id,
+    "WITHDRAW_APPROVED",
+    0,
+    `Approved by ${interaction.user.tag} | Withdraw: ${withdrawId}`
+  );
+
+  const embed = makeLogEmbed(
+    "✅ Withdrawal Successful",
+    `**ID:** \`${withdrawId}\`\n` +
+    `👤 **User:** <@${request.user_id}>\n` +
+    `💰 **Amount:** ${request.amount.toLocaleString()} coins\n` +
+    `💳 **Balance Before:** ${request.balance_before.toLocaleString()} coins\n` +
+    `💳 **Balance After:** ${request.balance_after.toLocaleString()} coins\n\n` +
+    `Withdrawal has been verified by Admin.\n` +
+    `🛡️ **Approved By:** ${interaction.user}`,
+    0x00ff00
+  );
+
+  return interaction.update({
+    embeds: [embed],
+    components: []
+  });
+}
+
+async function handleWithdrawDeny(interaction) {
+  const guildId = interaction.guild.id;
+  const withdrawId = interaction.customId.replace("withdraw_deny:", "");
+
+  if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      content: "❌ Only admins can deny withdrawals.",
+      ephemeral: true
+    });
+  }
+
+  const request = db.prepare(
+    "SELECT * FROM withdrawals WHERE withdraw_id = ?"
+  ).get(withdrawId);
+
+  if (!request || request.status !== "pending") {
+    return interaction.reply({
+      content: "❌ This withdrawal is no longer pending.",
+      ephemeral: true
+    });
+  }
+
+  const denyTx = db.transaction(() => {
+    db.prepare(`
+      UPDATE withdrawals
+      SET status = 'denied', admin_id = ?, updated_at = ?
+      WHERE withdraw_id = ? AND status = 'pending'
+    `).run(interaction.user.id, Date.now(), withdrawId);
+
+    changeBalance(
+      guildId,
+      request.user_id,
+      request.amount,
+      "WITHDRAW_REFUND",
+      `Withdrawal denied refund by ${interaction.user.tag} | Withdraw: ${withdrawId}`
+    );
+  });
+
+  denyTx();
+
+  const newBalance = getBal(guildId, request.user_id);
+
+  const embed = makeLogEmbed(
+    "❌ Withdrawal Denied",
+    `**ID:** \`${withdrawId}\`\n` +
+    `👤 **User:** <@${request.user_id}>\n` +
+    `💰 **Refunded:** ${request.amount.toLocaleString()} coins\n` +
+    `💳 **Current Balance:** ${newBalance.toLocaleString()} coins\n\n` +
+    `Withdrawal has been denied by Admin and refunded.\n` +
+    `🛡️ **Denied By:** ${interaction.user}`,
+    0xff0000
+  );
+
+  return interaction.update({
+    embeds: [embed],
+    components: []
+  });
+}
 
 async function handleCancelCoinflipButton(interaction) {
   const guildId = interaction.guild.id;
@@ -585,6 +758,14 @@ client.on("interactionCreate", async interaction => {
         return handleCancelCoinflipButton(interaction);
       }
 
+      if (interaction.customId.startsWith("withdraw_approve:")) {
+        return handleWithdrawApprove(interaction);
+      }
+
+      if (interaction.customId.startsWith("withdraw_deny:")) {
+        return handleWithdrawDeny(interaction);
+      }
+
       return;
     }
 
@@ -670,6 +851,126 @@ client.on("interactionCreate", async interaction => {
         .setColor(0xff3b3b);
 
       return interaction.reply({ embeds: [embed] });
+    }
+
+    if (command === "withdraw") {
+      const user = interaction.user;
+      const input = interaction.options.getString("amount");
+      const balance = getBal(guildId, user.id);
+
+      const parsed = parseAmountInput(input, balance);
+
+      if (parsed.error) {
+        return interaction.reply({
+          content: `❌ ${parsed.error}`,
+          ephemeral: true
+        });
+      }
+
+      const amount = parsed.amount;
+
+      if (amount <= 0) {
+        return interaction.reply({
+          content: "❌ Withdrawal amount must be more than 0.",
+          ephemeral: true
+        });
+      }
+
+      if (amount > balance) {
+        return interaction.reply({
+          content: "❌ You do not have enough balance for this withdrawal.",
+          ephemeral: true
+        });
+      }
+
+      const pending = db.prepare(`
+        SELECT *
+        FROM withdrawals
+        WHERE guild_id = ?
+        AND user_id = ?
+        AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(guildId, user.id);
+
+      if (pending) {
+        return interaction.reply({
+          content: "❌ You already have a pending withdrawal. Wait for admin approval/denial first.",
+          ephemeral: true
+        });
+      }
+
+      const withdrawId = makeWithdrawId();
+      const balanceBefore = balance;
+      const balanceAfter = balance - amount;
+
+      const withdrawTx = db.transaction(() => {
+        changeBalance(
+          guildId,
+          user.id,
+          -amount,
+          "WITHDRAW_LOCK",
+          `Withdrawal request locked | Withdraw: ${withdrawId} | Mode: ${parsed.mode}`
+        );
+
+        db.prepare(`
+          INSERT INTO withdrawals
+          (withdraw_id, guild_id, channel_id, user_id, amount, balance_before, balance_after, status, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        `).run(
+          withdrawId,
+          guildId,
+          interaction.channel.id,
+          user.id,
+          amount,
+          balanceBefore,
+          balanceAfter,
+          Date.now()
+        );
+      });
+
+      withdrawTx();
+
+      const requestEmbed = makeLogEmbed(
+        "💸 Withdrawal Request",
+        `**ID:** \`${withdrawId}\`\n` +
+        `👤 **User:** ${user}\n` +
+        `💰 **Amount:** ${amount.toLocaleString()} coins\n` +
+        `📌 **Mode:** ${parsed.mode}\n` +
+        `💳 **Balance Before:** ${balanceBefore.toLocaleString()} coins\n` +
+        `💳 **Balance After:** ${balanceAfter.toLocaleString()} coins\n\n` +
+        `⏳ Waiting for admin verification.`,
+        0xffcc00
+      );
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`withdraw_approve:${withdrawId}`)
+          .setLabel("Approve")
+          .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+          .setCustomId(`withdraw_deny:${withdrawId}`)
+          .setLabel("Deny")
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      const logMsg = await logToChannel(client, requestEmbed, [row]);
+
+      if (logMsg) {
+        db.prepare(
+          "UPDATE withdrawals SET message_id = ? WHERE withdraw_id = ?"
+        ).run(logMsg.id, withdrawId);
+      }
+
+      return interaction.reply({
+        content:
+          `✅ Withdrawal request created.\n` +
+          `💰 Amount: **${amount.toLocaleString()} coins**\n` +
+          `💳 Balance After Lock: **${balanceAfter.toLocaleString()} coins**\n` +
+          `⏳ Waiting for admin approval.`,
+        ephemeral: true
+      });
     }
 
     if (command === "addcoins") {
@@ -947,6 +1248,10 @@ client.on("interactionCreate", async interaction => {
 
       const finishedFlips = db.prepare(
         "SELECT COUNT(*) AS count FROM coinflips WHERE guild_id = ? AND status = 'finished'"
+      ).get(guildId);
+
+      const pendingWithdrawals = db.prepare(
+        "SELECT COUNT(*) AS count FROM withdrawals WHERE guild_id = ? AND status = 'pending'"
       ).get(guildId);
 
       const totalCoins = db.prepare(
