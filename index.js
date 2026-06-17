@@ -15,7 +15,7 @@ const {
 } = require("discord.js");
 
 const Database = require("better-sqlite3");
-const db = new Database("economy.db");
+const db = new Database(process.env.DB_PATH || "economy.db");
 
 const BOT_VERSION = "2.1.0";
 const MAX_BET = 100_000_000;
