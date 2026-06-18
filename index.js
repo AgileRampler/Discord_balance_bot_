@@ -23,6 +23,7 @@ const db = new Database(dbPath);
 
 const BOT_VERSION = "2.9.0";
 const MAX_BET = 1_000_000;
+const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
 const WITHDRAW_FEE_PERCENT = 18;
 
@@ -1356,6 +1357,7 @@ client.on("interactionCreate", async interaction => {
       const creator = interaction.user;
       const choice = interaction.options.getString("choice");
       const bet = interaction.options.getInteger("bet");
+      
 
       if (bet <= 0) {
         return interaction.reply({
@@ -1363,6 +1365,14 @@ client.on("interactionCreate", async interaction => {
           ephemeral: true
         });
       }
+
+      if (bet < MIN_BET) {
+  return interaction.reply({
+    content: `❌ Minimum coinflip bet is **${MIN_BET.toLocaleString()} coins**.`,
+    ephemeral: true
+  });
+}
+
 
       if (bet > MAX_BET) {
         return interaction.reply({
