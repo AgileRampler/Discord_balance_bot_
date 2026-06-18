@@ -798,6 +798,15 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("duel")
+    .setDescription("Create a skill-based PvP duel")
+    .addIntegerOption(o =>
+      o.setName("bet")
+        .setDescription("Duel bet amount")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName("poker")
     .setDescription("Create a simple 5-card poker game")
     .addIntegerOption(o =>
@@ -1392,6 +1401,26 @@ client.on("interactionCreate", async interaction => {
         return handlePokerStart(interaction);
       }
 
+      if (interaction.customId.startsWith("duel_join:")) {
+        return handleDuelJoin(interaction);
+      }
+
+      if (interaction.customId.startsWith("duel_cancel:")) {
+        return handleDuelCancel(interaction);
+      }
+
+      if (interaction.customId.startsWith("duel_attack:")) {
+        return handleDuelMove(interaction, "attack");
+      }
+
+      if (interaction.customId.startsWith("duel_defend:")) {
+        return handleDuelMove(interaction, "defend");
+      }
+
+      if (interaction.customId.startsWith("duel_heavy:")) {
+        return handleDuelMove(interaction, "heavy");
+      }
+
 
 
 
@@ -1804,6 +1833,102 @@ client.on("interactionCreate", async interaction => {
           : "🛑 Coinflip has been **disabled**."
       );
     }
+
+    // -------- Duel Code -------
+    if (command === "duel") {
+      const creator = interaction.user;
+      const bet = interaction.options.getInteger("bet");
+
+      if (bet < MIN_DUEL_BET) {
+        return interaction.reply({
+          content: `❌ Minimum duel bet is **${MIN_DUEL_BET.toLocaleString()} Digital Silver**.`,
+          ephemeral: true
+        });
+      }
+
+      if (bet > MAX_DUEL_BET) {
+        return interaction.reply({
+          content: `❌ Maximum duel bet is **${MAX_DUEL_BET.toLocaleString()} Digital Silver**.`,
+          ephemeral: true
+        });
+      }
+
+      const openDuel = db.prepare(`
+        SELECT *
+        FROM duels
+        WHERE guild_id = ?
+        AND creator_id = ?
+        AND status = 'open'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(guildId, creator.id);
+
+      if (openDuel) {
+        return interaction.reply({
+          content: "❌ You already have an open duel. Start or cancel it first.",
+          ephemeral: true
+        });
+      }
+
+      if (getBal(guildId, creator.id) < bet) {
+        return interaction.reply({
+          content: "❌ You do not have enough Digital Silver.",
+          ephemeral: true
+        });
+      }
+
+      const duelId = makeDuelId();
+
+      const createDuelTx = db.transaction(() => {
+        changeBalance(
+          guildId,
+          creator.id,
+          -bet,
+          "DUEL_CREATE_LOCK",
+          `Created duel | Duel: ${duelId}`
+        );
+
+        db.prepare(`
+          INSERT INTO duels
+          (duel_id, guild_id, channel_id, creator_id, bet, creator_hp, opponent_hp, status, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)
+        `).run(
+          duelId,
+          guildId,
+          interaction.channel.id,
+          creator.id,
+          bet,
+          DUEL_START_HP,
+          DUEL_START_HP,
+          Date.now()
+        );
+      });
+
+      createDuelTx();
+
+      const duel = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+
+      const msg = await interaction.reply({
+        embeds: [duelOpenEmbed(duel)],
+        components: [duelButtons(duelId)],
+        fetchReply: true
+      });
+
+      db.prepare("UPDATE duels SET message_id = ? WHERE duel_id = ?")
+        .run(msg.id, duelId);
+
+      await logCasino(
+        makeLogEmbed(
+          "⚔️ Duel Created",
+          `👤 **Creator:** ${creator}\n` +
+          `💰 **Bet:** ${bet.toLocaleString()} Digital Silver\n` +
+          `🎮 **Duel:** \`${duelId}\``
+        )
+      );
+
+      return;
+    }
+    // -------- Duel Code End -------
 
     // -------- Poker Code -------
     if (command === "poker") {
@@ -2565,135 +2690,6 @@ async function handleDuelMove(interaction, move) {
     components: [duelFightButtons(duelId)]
   });
 }
-
-// ===== Slash Command Handler =====
-// Add inside interactionCreate slash command section:
-if (command === "duel") {
-  const creator = interaction.user;
-  const bet = interaction.options.getInteger("bet");
-
-  if (bet < MIN_DUEL_BET) {
-    return interaction.reply({
-      content: `❌ Minimum duel bet is **${MIN_DUEL_BET.toLocaleString()} Digital Silver**.`,
-      ephemeral: true
-    });
-  }
-
-  if (bet > MAX_DUEL_BET) {
-    return interaction.reply({
-      content: `❌ Maximum duel bet is **${MAX_DUEL_BET.toLocaleString()} Digital Silver**.`,
-      ephemeral: true
-    });
-  }
-
-  const openDuel = db.prepare(`
-    SELECT *
-    FROM duels
-    WHERE guild_id = ?
-    AND creator_id = ?
-    AND status = 'open'
-    ORDER BY created_at DESC
-    LIMIT 1
-  `).get(guildId, creator.id);
-
-  if (openDuel) {
-    return interaction.reply({
-      content: "❌ You already have an open duel. Start or cancel it first.",
-      ephemeral: true
-    });
-  }
-
-  if (getBal(guildId, creator.id) < bet) {
-    return interaction.reply({
-      content: "❌ You do not have enough Digital Silver.",
-      ephemeral: true
-    });
-  }
-
-  const duelId = makeDuelId();
-
-  const createDuelTx = db.transaction(() => {
-    changeBalance(
-      guildId,
-      creator.id,
-      -bet,
-      "DUEL_CREATE_LOCK",
-      `Created duel | Duel: ${duelId}`
-    );
-
-    db.prepare(`
-      INSERT INTO duels
-      (duel_id, guild_id, channel_id, creator_id, bet, creator_hp, opponent_hp, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)
-    `).run(
-      duelId,
-      guildId,
-      interaction.channel.id,
-      creator.id,
-      bet,
-      DUEL_START_HP,
-      DUEL_START_HP,
-      Date.now()
-    );
-  });
-
-  createDuelTx();
-
-  const duel = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
-
-  const msg = await interaction.reply({
-    embeds: [duelOpenEmbed(duel)],
-    components: [duelButtons(duelId)],
-    fetchReply: true
-  });
-
-  db.prepare("UPDATE duels SET message_id = ? WHERE duel_id = ?")
-    .run(msg.id, duelId);
-
-  await logCasino(
-    makeLogEmbed(
-      "⚔️ Duel Created",
-      `👤 **Creator:** ${creator}\n` +
-      `💰 **Bet:** ${bet.toLocaleString()} Digital Silver\n` +
-      `🎮 **Duel:** \`${duelId}\``
-    )
-  );
-
-  return;
-}
-
-// ===== Button Handler =====
-// Add inside interaction.isButton() section:
-if (interaction.customId.startsWith("duel_join:")) {
-  return handleDuelJoin(interaction);
-}
-
-if (interaction.customId.startsWith("duel_cancel:")) {
-  return handleDuelCancel(interaction);
-}
-
-if (interaction.customId.startsWith("duel_attack:")) {
-  return handleDuelMove(interaction, "attack");
-}
-
-if (interaction.customId.startsWith("duel_defend:")) {
-  return handleDuelMove(interaction, "defend");
-}
-
-if (interaction.customId.startsWith("duel_heavy:")) {
-  return handleDuelMove(interaction, "heavy");
-}
-
-// ===== Command Builder =====
-// Add inside commands array:
-new SlashCommandBuilder()
-  .setName("duel")
-  .setDescription("Create a skill-based PvP duel")
-  .addIntegerOption(o =>
-    o.setName("bet")
-      .setDescription("Duel bet amount")
-      .setRequired(true)
-  ),
 // -------- Duel Code End -------
 
 
