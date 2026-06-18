@@ -22,7 +22,7 @@ console.log("Using database:", dbPath);
 const db = new Database(dbPath);
 
 const BOT_VERSION = "2.9.0";
-const MAX_BET = 1_000_000;
+const MAX_BET = 5_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
 const WITHDRAW_FEE_PERCENT = 18;
@@ -759,8 +759,8 @@ async function handleCancelCoinflipButton(interaction) {
     });
   }
 
-  await logToChannel(
-    client,
+  await logCasino(
+    
     makeLogEmbed(
       "❌ Coinflip Cancelled",
       `👤 **User:** <@${game.creator_id}>\n💰 **Refunded:** ${game.bet.toLocaleString()} coins\n🎮 **Game:** \`${gameId}\``,
@@ -882,8 +882,8 @@ async function handleJoinCoinflip(interaction) {
     });
   }
 
-  await logToChannel(
-    client,
+  await logCasino(
+
     makeLogEmbed(
       "🏆 Coinflip Result",
       `🎲 **Result:** ${result.toUpperCase()}\n🥇 **Winner:** <@${winnerId}>\n💀 **Loser:** <@${loserId}>\n💰 **Pot:** ${pot.toLocaleString()} coins\n🎮 **Game:** \`${gameId}\``
@@ -1330,8 +1330,8 @@ client.on("interactionCreate", async interaction => {
 
       setCoinflipEnabled(guildId, enabled);
 
-      await logToChannel(
-        client,
+      await logCasino(
+        
         makeLogEmbed(
           enabled ? "✅ Coinflip Enabled" : "🛑 Coinflip Disabled",
           `🛡️ **Admin:** ${interaction.user}\n📌 **Status:** ${enabled ? "Enabled" : "Disabled"}`,
@@ -1424,9 +1424,13 @@ client.on("interactionCreate", async interaction => {
       });
 
       createTx();
+      
 
-      await logToChannel(
-        client,
+
+
+
+      await logCasino(
+        
         makeLogEmbed(
           "🪙 Coinflip Created",
           `👤 **Creator:** ${creator}\n🎯 **Choice:** ${choice.toUpperCase()}\n💰 **Bet Locked:** ${bet.toLocaleString()} coins\n🎮 **Game:** \`${gameId}\``
@@ -1615,5 +1619,32 @@ process.on("uncaughtException", err => {
 process.on("unhandledRejection", err => {
   console.error("Unhandled Rejection:", err);
 });
+
+
+async function logCasino(embed, components = []) {
+  try {
+    const channelId = process.env.CASINO_LOG_CHANNEL;
+
+    if (!channelId) return null;
+
+    const channel = await client.channels.fetch(channelId);
+
+    if (!channel || !channel.isTextBased()) return null;
+
+    return await channel.send({
+      embeds: [embed],
+      components
+    });
+  } catch (err) {
+    console.error("Casino log error:", err);
+    return null;
+  }
+}
+
+
+
+
+
+
 
 client.login(process.env.TOKEN);
