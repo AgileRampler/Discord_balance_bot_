@@ -1136,10 +1136,14 @@ client.on("interactionCreate", async interaction => {
     //   });
     // }
 
-return interaction.deferReply({ ephemeral: true })
-  .then(() => interaction.deleteReply())
-  .catch(() => {});
+await interaction.reply({
+  content: "✅",
+  ephemeral: true
+});
 
+setTimeout(() => {
+  interaction.deleteReply().catch(() => {});
+}, 500);
 
     if (command === "clearwithdraw") {
   if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
