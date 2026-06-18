@@ -147,6 +147,19 @@ async function notifyUser(client, userId, message) {
   }
 }
 
+new SlashCommandBuilder()
+  .setName("clearwithdraw")
+  .setDescription("Admin only: clear/refund a user's pending withdrawal")
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+  .addUserOption(o =>
+    o.setName("user")
+      .setDescription("User whose pending withdrawal should be cleared")
+      .setRequired(true)
+  ),
+
+
+
+
 function makeLogEmbed(title, description, color = 0xff3b3b) {
   return new EmbedBuilder()
     .setTitle(title)
@@ -907,6 +920,79 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId.startsWith("withdraw_cancel:")) {
         return handleWithdrawCancel(interaction);
       }
+
+if (command === "clearwithdraw") {
+  if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      content: "❌ Only admins can use this.",
+      ephemeral: true
+    });
+  }
+
+  const user = interaction.options.getUser("user");
+
+  const pending = db.prepare(`
+    SELECT *
+    FROM withdrawals
+    WHERE guild_id = ?
+    AND user_id = ?
+    AND status = 'pending'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(guildId, user.id);
+
+  if (!pending) {
+    return interaction.reply({
+      content: `❌ ${user} has no pending withdrawal.`,
+      ephemeral: true
+    });
+  }
+
+  const clearTx = db.transaction(() => {
+    db.prepare(`
+      UPDATE withdrawals
+      SET status = 'cancelled',
+          admin_id = ?,
+          updated_at = ?
+      WHERE withdraw_id = ?
+      AND status = 'pending'
+    `).run(interaction.user.id, Date.now(), pending.withdraw_id);
+
+    changeBalance(
+      guildId,
+      user.id,
+      pending.amount,
+      "WITHDRAW_ADMIN_CLEAR_REFUND",
+      `Pending withdrawal cleared/refunded by ${interaction.user.tag} | Withdraw: ${pending.withdraw_id}`
+    );
+  });
+
+  clearTx();
+
+  const newBalance = getBal(guildId, user.id);
+
+  await logToChannel(
+    client,
+    makeLogEmbed(
+      "🧹 Pending Withdrawal Cleared",
+      `👤 **User:** ${user}\n` +
+      `💰 **Refunded:** ${pending.amount.toLocaleString()} coins\n` +
+      `💳 **New Balance:** ${newBalance.toLocaleString()} coins\n` +
+      `🆔 **Withdraw ID:** \`${pending.withdraw_id}\`\n` +
+      `🛡️ **Cleared By:** ${interaction.user}`,
+      0x808080
+    )
+  );
+
+  return interaction.reply(
+    `✅ Cleared pending withdrawal for ${user}.\n` +
+    `💰 Refunded **${pending.amount.toLocaleString()} coins**.\n` +
+    `💳 New balance: **${newBalance.toLocaleString()} coins**`
+  );
+}
+
+
+
 
       return;
     }
