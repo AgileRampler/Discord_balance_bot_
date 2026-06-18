@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "2.7.0";
+const BOT_VERSION = "2.8.0";
 const MAX_BET = 1_000_000;
 
 db.pragma("journal_mode = WAL");
@@ -413,6 +413,7 @@ async function registerCommands() {
     );
 
     console.log("✅ Commands refreshed.");
+    console.log("Registered commands:", commands.map(c => c.name).join(", "));
   } catch (err) {
     console.error("Command register error:", err);
   }
