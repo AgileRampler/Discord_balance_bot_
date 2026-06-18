@@ -21,8 +21,10 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "2.8.0";
+const BOT_VERSION = "2.9.0";
 const MAX_BET = 1_000_000;
+const MIN_WITHDRAW = 500_000;
+const WITHDRAW_FEE_PERCENT = 18;
 
 db.pragma("journal_mode = WAL");
 
@@ -510,11 +512,16 @@ async function handleWithdrawApprove(interaction) {
     `Approved by ${interaction.user.tag} | Withdraw: ${withdrawId}`
   );
 
+  const fee = Math.floor((request.amount * WITHDRAW_FEE_PERCENT) / 100);
+  const netAmount = request.amount - fee;
+
   const embed = makeLogEmbed(
     "✅ Withdrawal Successful",
     `**ID:** \`${withdrawId}\`\n` +
     `👤 **User:** <@${request.user_id}>\n` +
-    `💰 **Amount:** ${request.amount.toLocaleString()} coins\n` +
+    `💰 **Requested Amount:** ${request.amount.toLocaleString()} coins\n` +
+    `💸 **Fee (${WITHDRAW_FEE_PERCENT}%):** ${fee.toLocaleString()} coins\n` +
+    `✅ **Net Payout:** ${netAmount.toLocaleString()} coins\n` +
     `💳 **Balance Before:** ${request.balance_before.toLocaleString()} coins\n` +
     `💳 **Balance After:** ${request.balance_after.toLocaleString()} coins\n\n` +
     `Withdrawal has been verified by Admin.\n` +
@@ -528,13 +535,13 @@ async function handleWithdrawApprove(interaction) {
   });
 
   await interaction.channel.send(
-    `✅ <@${request.user_id}> your withdrawal of **${request.amount.toLocaleString()} coins** has been **approved** by ${interaction.user}.`
+    `✅ <@${request.user_id}> your withdrawal has been **approved** by ${interaction.user}. Net payout: **${netAmount.toLocaleString()} coins** after ${WITHDRAW_FEE_PERCENT}% fee.`
   ).catch(() => {});
 
   await notifyUser(
     client,
     request.user_id,
-    `✅ Your withdrawal was approved.\nAmount: ${request.amount.toLocaleString()} coins\nApproved by: ${interaction.user.tag}`
+    `✅ Your withdrawal was approved.\nRequested: ${request.amount.toLocaleString()} coins\nFee (${WITHDRAW_FEE_PERCENT}%): ${fee.toLocaleString()} coins\nNet Payout: ${netAmount.toLocaleString()} coins\nApproved by: ${interaction.user.tag}`
   );
 
   await logToChannel(client, embed);
@@ -1039,6 +1046,13 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
+      if (amount < MIN_WITHDRAW) {
+        return interaction.reply({
+          content: `❌ Minimum withdrawal is **${MIN_WITHDRAW.toLocaleString()} coins**.`,
+          ephemeral: true
+        });
+      }
+
       if (amount > balance) {
         return interaction.reply({
           content: "❌ You do not have enough balance for this withdrawal.",
@@ -1066,6 +1080,8 @@ client.on("interactionCreate", async interaction => {
       const withdrawId = makeWithdrawId();
       const balanceBefore = balance;
       const balanceAfter = balance - amount;
+      const fee = Math.floor((amount * WITHDRAW_FEE_PERCENT) / 100);
+      const netAmount = amount - fee;
 
       const withdrawTx = db.transaction(() => {
         changeBalance(
@@ -1098,7 +1114,9 @@ client.on("interactionCreate", async interaction => {
         "💸 Withdrawal Request",
         `**ID:** \`${withdrawId}\`\n` +
         `👤 **User:** ${user}\n` +
-        `💰 **Amount:** ${amount.toLocaleString()} coins\n` +
+        `💰 **Requested Amount:** ${amount.toLocaleString()} coins\n` +
+        `💸 **Fee (${WITHDRAW_FEE_PERCENT}%):** ${fee.toLocaleString()} coins\n` +
+        `✅ **Net Payout:** ${netAmount.toLocaleString()} coins\n` +
         `📌 **Mode:** ${parsed.mode}\n` +
         `💳 **Balance Before:** ${balanceBefore.toLocaleString()} coins\n` +
         `💳 **Balance After Lock:** ${balanceAfter.toLocaleString()} coins\n\n` +
@@ -1121,29 +1139,22 @@ client.on("interactionCreate", async interaction => {
         client,
         makeLogEmbed(
           "💸 Withdrawal Request Created",
-          `👤 **User:** ${user}\n💰 **Amount:** ${amount.toLocaleString()} coins\n💳 **Balance After Lock:** ${balanceAfter.toLocaleString()} coins\n🧵 **Channel/Post:** <#${interaction.channel.id}>\n**ID:** \`${withdrawId}\``,
+          `👤 **User:** ${user}\n💰 **Requested:** ${amount.toLocaleString()} coins\n💸 **Fee (${WITHDRAW_FEE_PERCENT}%):** ${fee.toLocaleString()} coins\n✅ **Net Payout:** ${netAmount.toLocaleString()} coins\n💳 **Balance After Lock:** ${balanceAfter.toLocaleString()} coins\n🧵 **Channel/Post:** <#${interaction.channel.id}>\n**ID:** \`${withdrawId}\``,
           0xffcc00
         )
       );
 
-    //   return interaction.reply({
-    //     content:
-    //       `✅ Withdrawal request posted in this forum post/channel.\n` +
-    //       `💰 Amount: **${amount.toLocaleString()} coins**\n` +
-    //       `💳 Balance After Lock: **${balanceAfter.toLocaleString()} coins**\n` +
-    //       `⏳ Waiting for admin approval.`,
-    //     ephemeral: true
-    //   });
+      await interaction.reply({
+        content: "✅",
+        ephemeral: true
+      });
+
+      setTimeout(() => {
+        interaction.deleteReply().catch(() => {});
+      }, 500);
+
+      return;
     }
-
-await interaction.reply({
-  content: "✅",
-  ephemeral: true
-});
-
-setTimeout(() => {
-  interaction.deleteReply().catch(() => {});
-}, 500);
 
     if (command === "clearwithdraw") {
   if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
