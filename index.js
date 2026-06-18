@@ -1134,7 +1134,7 @@ client.on("interactionCreate", async interaction => {
     //       `⏳ Waiting for admin approval.`,
     //     ephemeral: true
     //   });
-    // }
+    }
 
 await interaction.reply({
   content: "✅",
