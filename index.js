@@ -1126,15 +1126,20 @@ client.on("interactionCreate", async interaction => {
         )
       );
 
-      return interaction.reply({
-        content:
-          `✅ Withdrawal request posted in this forum post/channel.\n` +
-          `💰 Amount: **${amount.toLocaleString()} coins**\n` +
-          `💳 Balance After Lock: **${balanceAfter.toLocaleString()} coins**\n` +
-          `⏳ Waiting for admin approval.`,
-        ephemeral: true
-      });
-    }
+    //   return interaction.reply({
+    //     content:
+    //       `✅ Withdrawal request posted in this forum post/channel.\n` +
+    //       `💰 Amount: **${amount.toLocaleString()} coins**\n` +
+    //       `💳 Balance After Lock: **${balanceAfter.toLocaleString()} coins**\n` +
+    //       `⏳ Waiting for admin approval.`,
+    //     ephemeral: true
+    //   });
+    // }
+
+return interaction.deferReply({ ephemeral: true })
+  .then(() => interaction.deleteReply())
+  .catch(() => {});
+
 
     if (command === "clearwithdraw") {
   if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
