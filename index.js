@@ -22,12 +22,12 @@ console.log("Using database:", dbPath);
 const db = new Database(dbPath);
 
 const BOT_VERSION = "3.4.1";
-const MAX_BET = 5_000_000;
+const MAX_BET = 1_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
 const WITHDRAW_FEE_PERCENT = 18;
 const MIN_BLACKJACK_BUYIN = 100_000;
-const MAX_BLACKJACK_BUYIN = 5_000_000;
+const MAX_BLACKJACK_BUYIN = 1_000_000;
 const MAX_BLACKJACK_PLAYERS = 4;
 const BLACKJACK_LOBBY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const BLACKJACK_TURN_TIMEOUT = 2 * 60 * 1000; // 2 minutes
