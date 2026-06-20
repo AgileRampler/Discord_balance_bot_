@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "3.3.0";
+const BOT_VERSION = "3.4.0";
 const MAX_BET = 5_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
@@ -31,6 +31,14 @@ const MAX_BLACKJACK_BUYIN = 5_000_000;
 const MAX_BLACKJACK_PLAYERS = 4;
 const BLACKJACK_LOBBY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const BLACKJACK_TURN_TIMEOUT = 2 * 60 * 1000; // 2 minutes
+const RAID_JOIN_FEE = 200_000;
+const RAID_MIN_PLAYERS = 5;
+const RAID_MAX_PLAYERS = 30;
+const RAID_BOSS_HP = 50_000;
+const RAID_JOIN_WINDOW = 10 * 60 * 1000; // 10 minutes
+const RAID_DURATION = 10 * 60 * 1000; // 10 minutes
+const RAID_ACTION_COOLDOWN = 10 * 1000; // 10 seconds
+const RAID_SPAWN_INTERVAL = 8 * 60 * 60 * 1000; // 3 times per 24 hours
 
 db.pragma("journal_mode = WAL");
 
@@ -47,12 +55,19 @@ db.prepare(`
 CREATE TABLE IF NOT EXISTS settings (
   guild_id TEXT PRIMARY KEY,
   coinflip_enabled INTEGER DEFAULT 1,
-  blackjack_enabled INTEGER DEFAULT 1
+  blackjack_enabled INTEGER DEFAULT 1,
+  raid_enabled INTEGER DEFAULT 1
 )
 `).run();
 
 try {
   db.prepare("ALTER TABLE settings ADD COLUMN blackjack_enabled INTEGER DEFAULT 1").run();
+} catch (err) {
+  if (!String(err.message).includes("duplicate column name")) console.error(err);
+}
+
+try {
+  db.prepare("ALTER TABLE settings ADD COLUMN raid_enabled INTEGER DEFAULT 1").run();
 } catch (err) {
   if (!String(err.message).includes("duplicate column name")) console.error(err);
 }
@@ -92,6 +107,44 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 
 
 
+
+// -------- Raid Boss Code -------
+db.prepare(`
+CREATE TABLE IF NOT EXISTS raid_bosses (
+  raid_id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  general_channel_id TEXT,
+  general_message_id TEXT,
+  raid_channel_id TEXT NOT NULL,
+  raid_message_id TEXT,
+  boss_name TEXT NOT NULL,
+  boss_hp INTEGER NOT NULL,
+  boss_max_hp INTEGER NOT NULL,
+  join_fee INTEGER NOT NULL,
+  reward_pool INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'open',
+  started_at INTEGER,
+  ends_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
+)
+`).run();
+
+db.prepare(`
+CREATE TABLE IF NOT EXISTS raid_players (
+  raid_id TEXT NOT NULL,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  damage INTEGER DEFAULT 0,
+  healing INTEGER DEFAULT 0,
+  tanking INTEGER DEFAULT 0,
+  actions INTEGER DEFAULT 0,
+  last_action_at INTEGER DEFAULT 0,
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (raid_id, user_id)
+)
+`).run();
+// -------- Raid Boss Code End -------
 
 db.prepare(`
 CREATE TABLE IF NOT EXISTS transactions (
@@ -224,6 +277,30 @@ function setBlackjackEnabled(guildId, enabled) {
     VALUES (?, ?)
     ON CONFLICT(guild_id)
     DO UPDATE SET blackjack_enabled = excluded.blackjack_enabled
+  `).run(guildId, enabled ? 1 : 0);
+}
+
+function isRaidEnabled(guildId) {
+  const row = db.prepare(
+    "SELECT raid_enabled FROM settings WHERE guild_id = ?"
+  ).get(guildId);
+
+  if (!row) {
+    db.prepare(
+      "INSERT INTO settings (guild_id, coinflip_enabled, blackjack_enabled, raid_enabled) VALUES (?, 1, 1, 1)"
+    ).run(guildId);
+    return true;
+  }
+
+  return row.raid_enabled === 1;
+}
+
+function setRaidEnabled(guildId, enabled) {
+  db.prepare(`
+    INSERT INTO settings (guild_id, raid_enabled)
+    VALUES (?, ?)
+    ON CONFLICT(guild_id)
+    DO UPDATE SET raid_enabled = excluded.raid_enabled
   `).run(guildId, enabled ? 1 : 0);
 }
 
@@ -539,6 +616,25 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("raidspawn")
+    .setDescription("Admin only: manually spawn a raid boss")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("raidadmin")
+    .setDescription("Admin only: enable or disable raid boss spawns")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(o =>
+      o.setName("status")
+        .setDescription("Enable or disable raid boss")
+        .setRequired(true)
+        .addChoices(
+          { name: "ENABLE", value: "enable" },
+          { name: "DISABLE", value: "disable" }
+        )
+    ),
+
+  new SlashCommandBuilder()
     .setName("dbstats")
     .setDescription("Admin only: show database stats")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -589,6 +685,579 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
+
+// -------- Raid Boss Code -------
+function makeRaidId() {
+  return `RAID-${Date.now()}-${Math.floor(Math.random() * 999999)}`;
+}
+
+function getRaidBossName() {
+  const names = [
+    "Ancient Dragon",
+    "Avalonian Warlord",
+    "Crystal Behemoth",
+    "Demon Prince",
+    "Undead Colossus"
+  ];
+
+  return names[Math.floor(Math.random() * names.length)];
+}
+
+function raidJoinButton(raidId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`raid_join:${raidId}`)
+      .setLabel("Join Raid")
+      .setStyle(ButtonStyle.Success)
+  );
+}
+
+function raidActionButtons(raidId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`raid_attack:${raidId}`)
+      .setLabel("⚔️ Attack")
+      .setStyle(ButtonStyle.Danger),
+
+    new ButtonBuilder()
+      .setCustomId(`raid_defend:${raidId}`)
+      .setLabel("🛡️ Defend")
+      .setStyle(ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId(`raid_heal:${raidId}`)
+      .setLabel("🩹 Heal")
+      .setStyle(ButtonStyle.Success)
+  );
+}
+
+function raidGeneralEmbed(raid, playerCount = 0) {
+  const raidChannelId = process.env.RAID_CHANNEL_ID;
+  const expireUnix = Math.floor((raid.created_at + RAID_JOIN_WINDOW) / 1000);
+
+  return new EmbedBuilder()
+    .setTitle("👹 Raid Boss Spawned!")
+    .setColor(0xff3b3b)
+    .setDescription(
+      `**Boss:** ${raid.boss_name}\n` +
+      `**HP:** ${raid.boss_hp.toLocaleString()} / ${raid.boss_max_hp.toLocaleString()}\n` +
+      `**Join Fee:** ${raid.join_fee.toLocaleString()} Digital Silver\n` +
+      `**Players:** ${playerCount}/${RAID_MAX_PLAYERS}\n` +
+      `**Minimum Required:** ${RAID_MIN_PLAYERS}\n` +
+      `**Current Reward Pool:** ${raid.reward_pool.toLocaleString()} Digital Silver\n` +
+      `⏰ **Join Window:** <t:${expireUnix}:R>\n\n` +
+      `Click **Join Raid** here, then continue the fight in ${raidChannelId ? `<#${raidChannelId}>` : "the raid channel"}.\n\n` +
+      `Rewards are funded only by join fees, so the guild treasury does not lose money.`
+    );
+}
+
+function raidStatusEmbed(raid, players, logText = "") {
+  const hpBarLength = 20;
+  const filled = Math.max(0, Math.round((raid.boss_hp / raid.boss_max_hp) * hpBarLength));
+  const bar = "█".repeat(filled) + "░".repeat(hpBarLength - filled);
+
+  const topPlayers = players
+    .map(p => {
+      const score = getRaidScore(p);
+      return { ...p, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+
+  const leaderboard = topPlayers.length
+    ? topPlayers.map((p, i) =>
+        `**#${i + 1}** <@${p.user_id}> — Score: **${Math.floor(p.score).toLocaleString()}** | DMG ${p.damage.toLocaleString()} | HEAL ${p.healing.toLocaleString()} | TANK ${p.tanking.toLocaleString()}`
+      ).join("\n")
+    : "No players joined yet.";
+
+  const timeText = raid.status === "open"
+    ? `⏰ **Join Ends:** <t:${Math.floor((raid.created_at + RAID_JOIN_WINDOW) / 1000)}:R>`
+    : `⏰ **Raid Ends:** <t:${Math.floor((raid.ends_at || Date.now() + RAID_DURATION) / 1000)}:R>`;
+
+  return new EmbedBuilder()
+    .setTitle(`👹 Raid Boss: ${raid.boss_name}`)
+    .setColor(0xff3b3b)
+    .setDescription(
+      `**Status:** ${raid.status.toUpperCase()}\n` +
+      `**Boss HP:** ${raid.boss_hp.toLocaleString()} / ${raid.boss_max_hp.toLocaleString()}\n` +
+      `\`${bar}\`\n\n` +
+      `**Players:** ${players.length}/${RAID_MAX_PLAYERS}\n` +
+      `**Join Fee:** ${raid.join_fee.toLocaleString()} Digital Silver\n` +
+      `**Reward Pool:** ${raid.reward_pool.toLocaleString()} Digital Silver\n` +
+      `${timeText}\n\n` +
+      `${logText ? `**Last Action:**\n${logText}\n\n` : ""}` +
+      `**Top Contributors:**\n${leaderboard}\n\n` +
+      `⚔️ Attack = damage score\n` +
+      `🩹 Heal = support score\n` +
+      `🛡️ Defend = tank score\n` +
+      `Action cooldown: ${RAID_ACTION_COOLDOWN / 1000}s`
+    );
+}
+
+function getRaidScore(player) {
+  return Number(player.damage || 0) + Number(player.healing || 0) * 0.8 + Number(player.tanking || 0) * 0.5;
+}
+
+async function updateRaidMessages(raidId, logText = "") {
+  const raid = db.prepare("SELECT * FROM raid_bosses WHERE raid_id = ?").get(raidId);
+  if (!raid) return;
+
+  const players = db.prepare(
+    "SELECT * FROM raid_players WHERE raid_id = ? ORDER BY joined_at ASC"
+  ).all(raidId);
+
+  if (raid.raid_channel_id && raid.raid_message_id) {
+    try {
+      const channel = await client.channels.fetch(raid.raid_channel_id);
+      const msg = await channel.messages.fetch(raid.raid_message_id);
+
+      await msg.edit({
+        embeds: [raidStatusEmbed(raid, players, logText)],
+        components: raid.status === "active" ? [raidActionButtons(raidId)] : []
+      });
+    } catch (err) {
+      console.error("Raid message update error:", err);
+    }
+  }
+
+  if (raid.general_channel_id && raid.general_message_id && raid.status === "open") {
+    try {
+      const channel = await client.channels.fetch(raid.general_channel_id);
+      const msg = await channel.messages.fetch(raid.general_message_id);
+
+      await msg.edit({
+        embeds: [raidGeneralEmbed(raid, players.length)],
+        components: [raidJoinButton(raidId)]
+      });
+    } catch (err) {
+      console.error("Raid general message update error:", err);
+    }
+  }
+}
+
+async function spawnRaidBoss(client, manualGuildId = null) {
+  const generalChannelId = process.env.RAID_GENERAL_CHANNEL_ID;
+  const raidChannelId = process.env.RAID_CHANNEL_ID;
+
+  if (!generalChannelId || !raidChannelId) {
+    console.error("RAID_GENERAL_CHANNEL_ID or RAID_CHANNEL_ID missing.");
+    return null;
+  }
+
+  const raidChannel = await client.channels.fetch(raidChannelId).catch(() => null);
+  const generalChannel = await client.channels.fetch(generalChannelId).catch(() => null);
+
+  if (!raidChannel || !generalChannel || !raidChannel.isTextBased() || !generalChannel.isTextBased()) {
+    console.error("Raid channels invalid or not text based.");
+    return null;
+  }
+
+  const guildId = manualGuildId || raidChannel.guild?.id || generalChannel.guild?.id;
+
+  if (!guildId) return null;
+
+  if (!isRaidEnabled(guildId)) {
+    console.log("Raid spawn skipped because raids are disabled.");
+    return null;
+  }
+
+  const existing = db.prepare(`
+    SELECT *
+    FROM raid_bosses
+    WHERE guild_id = ?
+    AND status IN ('open', 'active')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(guildId);
+
+  if (existing) {
+    console.log("Raid spawn skipped because an active/open raid already exists.");
+    return existing;
+  }
+
+  const raidId = makeRaidId();
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT INTO raid_bosses
+    (raid_id, guild_id, general_channel_id, raid_channel_id, boss_name, boss_hp, boss_max_hp, join_fee, reward_pool, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'open', ?, ?)
+  `).run(
+    raidId,
+    guildId,
+    generalChannelId,
+    raidChannelId,
+    getRaidBossName(),
+    RAID_BOSS_HP,
+    RAID_BOSS_HP,
+    RAID_JOIN_FEE,
+    now,
+    now
+  );
+
+  const raid = db.prepare("SELECT * FROM raid_bosses WHERE raid_id = ?").get(raidId);
+
+  const generalMsg = await generalChannel.send({
+    embeds: [raidGeneralEmbed(raid, 0)],
+    components: [raidJoinButton(raidId)]
+  });
+
+  const raidMsg = await raidChannel.send({
+    embeds: [raidStatusEmbed(raid, [], `Raid boss spawned. Join from <#${generalChannelId}>.`)],
+    components: []
+  });
+
+  db.prepare(`
+    UPDATE raid_bosses
+    SET general_message_id = ?,
+        raid_message_id = ?
+    WHERE raid_id = ?
+  `).run(generalMsg.id, raidMsg.id, raidId);
+
+  await logCasino(
+    makeLogEmbed(
+      "👹 Raid Boss Spawned",
+      `**Boss:** ${raid.boss_name}\n` +
+      `🎮 **Raid:** \`${raidId}\`\n` +
+      `📢 **Spawn Channel:** <#${generalChannelId}>\n` +
+      `⚔️ **Raid Channel:** <#${raidChannelId}>\n` +
+      `💰 **Join Fee:** ${RAID_JOIN_FEE.toLocaleString()} Digital Silver`
+    )
+  );
+
+  return raid;
+}
+
+async function handleRaidJoin(interaction) {
+  const guildId = interaction.guild.id;
+  const raidId = interaction.customId.replace("raid_join:", "");
+  const raid = db.prepare("SELECT * FROM raid_bosses WHERE raid_id = ?").get(raidId);
+
+  if (!raid || raid.status !== "open") {
+    return interaction.reply({
+      content: "❌ This raid is no longer open for joining.",
+      ephemeral: true
+    });
+  }
+
+  const count = db.prepare("SELECT COUNT(*) AS count FROM raid_players WHERE raid_id = ?").get(raidId).count;
+
+  if (count >= RAID_MAX_PLAYERS) {
+    return interaction.reply({
+      content: "❌ Raid is full.",
+      ephemeral: true
+    });
+  }
+
+  const existing = db.prepare(
+    "SELECT * FROM raid_players WHERE raid_id = ? AND user_id = ?"
+  ).get(raidId, interaction.user.id);
+
+  if (existing) {
+    return interaction.reply({
+      content: `✅ You already joined. Continue in <#${raid.raid_channel_id}>.`,
+      ephemeral: true
+    });
+  }
+
+  if (getBal(guildId, interaction.user.id) < raid.join_fee) {
+    return interaction.reply({
+      content: `❌ You need **${raid.join_fee.toLocaleString()} Digital Silver** to join this raid.`,
+      ephemeral: true
+    });
+  }
+
+  const joinTx = db.transaction(() => {
+    changeBalance(
+      guildId,
+      interaction.user.id,
+      -raid.join_fee,
+      "RAID_JOIN_FEE",
+      `Joined raid boss | Raid: ${raidId}`
+    );
+
+    db.prepare(`
+      INSERT INTO raid_players
+      (raid_id, guild_id, user_id, joined_at)
+      VALUES (?, ?, ?, ?)
+    `).run(raidId, guildId, interaction.user.id, Date.now());
+
+    db.prepare(`
+      UPDATE raid_bosses
+      SET reward_pool = reward_pool + ?,
+          updated_at = ?
+      WHERE raid_id = ?
+    `).run(raid.join_fee, Date.now(), raidId);
+  });
+
+  joinTx();
+
+  const newCount = db.prepare("SELECT COUNT(*) AS count FROM raid_players WHERE raid_id = ?").get(raidId).count;
+
+  if (newCount >= RAID_MIN_PLAYERS) {
+    const fresh = db.prepare("SELECT * FROM raid_bosses WHERE raid_id = ?").get(raidId);
+
+    if (fresh.status === "open") {
+      db.prepare(`
+        UPDATE raid_bosses
+        SET status = 'active',
+            started_at = ?,
+            ends_at = ?,
+            updated_at = ?
+        WHERE raid_id = ?
+        AND status = 'open'
+      `).run(Date.now(), Date.now() + RAID_DURATION, Date.now(), raidId);
+
+      await updateRaidMessages(raidId, "Minimum players reached. Raid started!");
+    }
+  } else {
+    await updateRaidMessages(raidId, `<@${interaction.user.id}> joined the raid.`);
+  }
+
+  return interaction.reply({
+    content:
+      `✅ You joined the raid. **${raid.join_fee.toLocaleString()} Digital Silver** locked as join fee.\n` +
+      `Continue the fight here: <#${raid.raid_channel_id}>`,
+    ephemeral: true
+  });
+}
+
+async function handleRaidAction(interaction, action) {
+  const guildId = interaction.guild.id;
+  const raidId = interaction.customId.replace(`raid_${action}:`, "");
+  const raid = db.prepare("SELECT * FROM raid_bosses WHERE raid_id = ?").get(raidId);
+
+  if (!raid || raid.status !== "active") {
+    return interaction.reply({
+      content: "❌ This raid is not active.",
+      ephemeral: true
+    });
+  }
+
+  const player = db.prepare(
+    "SELECT * FROM raid_players WHERE raid_id = ? AND user_id = ?"
+  ).get(raidId, interaction.user.id);
+
+  if (!player) {
+    return interaction.reply({
+      content: "❌ You must join the raid from the spawn message first.",
+      ephemeral: true
+    });
+  }
+
+  const now = Date.now();
+  const waitMs = RAID_ACTION_COOLDOWN - (now - Number(player.last_action_at || 0));
+
+  if (waitMs > 0) {
+    return interaction.reply({
+      content: `⏳ You are on cooldown. Try again in **${Math.ceil(waitMs / 1000)}s**.`,
+      ephemeral: true
+    });
+  }
+
+  let damage = 0;
+  let healing = 0;
+  let tanking = 0;
+  let logText = "";
+
+  if (action === "attack") {
+    damage = Math.floor(Math.random() * 351) + 250;
+    logText = `<@${interaction.user.id}> attacked and dealt **${damage.toLocaleString()} damage**.`;
+  }
+
+  if (action === "heal") {
+    healing = Math.floor(Math.random() * 201) + 150;
+    logText = `<@${interaction.user.id}> healed the raid for **${healing.toLocaleString()} support**.`;
+  }
+
+  if (action === "defend") {
+    tanking = Math.floor(Math.random() * 251) + 200;
+    logText = `<@${interaction.user.id}> defended the raid and gained **${tanking.toLocaleString()} tank score**.`;
+  }
+
+  const newHp = Math.max(0, raid.boss_hp - damage);
+
+  db.prepare(`
+    UPDATE raid_players
+    SET damage = damage + ?,
+        healing = healing + ?,
+        tanking = tanking + ?,
+        actions = actions + 1,
+        last_action_at = ?
+    WHERE raid_id = ?
+    AND user_id = ?
+  `).run(damage, healing, tanking, now, raidId, interaction.user.id);
+
+  db.prepare(`
+    UPDATE raid_bosses
+    SET boss_hp = ?,
+        updated_at = ?
+    WHERE raid_id = ?
+  `).run(newHp, now, raidId);
+
+  if (newHp <= 0) {
+    const embed = finishRaidBoss(guildId, raidId, true);
+    await logCasino(embed);
+
+    const fresh = db.prepare("SELECT * FROM raid_bosses WHERE raid_id = ?").get(raidId);
+
+    if (fresh.raid_channel_id && fresh.raid_message_id) {
+      try {
+        const channel = await client.channels.fetch(fresh.raid_channel_id);
+        const msg = await channel.messages.fetch(fresh.raid_message_id);
+        await msg.edit({ embeds: [embed], components: [] });
+      } catch {}
+    }
+
+    return interaction.update({
+      embeds: [embed],
+      components: []
+    }).catch(() => interaction.reply({ content: "🏆 Raid boss defeated!", ephemeral: true }));
+  }
+
+  await updateRaidMessages(raidId, logText);
+
+  return interaction.deferUpdate().catch(() => {});
+}
+
+function finishRaidBoss(guildId, raidId, defeated) {
+  const raid = db.prepare("SELECT * FROM raid_bosses WHERE raid_id = ?").get(raidId);
+  const players = db.prepare("SELECT * FROM raid_players WHERE raid_id = ?").all(raidId);
+
+  if (!raid || !["active", "open"].includes(raid.status)) {
+    return makeLogEmbed("Raid Already Finished", `Raid \`${raidId}\` is already handled.`, 0x808080);
+  }
+
+  const ranked = players
+    .map(p => ({ ...p, score: getRaidScore(p) }))
+    .sort((a, b) => b.score - a.score);
+
+  const totalScore = ranked.reduce((sum, p) => sum + p.score, 0);
+
+  const finishTx = db.transaction(() => {
+    db.prepare(`
+      UPDATE raid_bosses
+      SET status = ?,
+          updated_at = ?
+      WHERE raid_id = ?
+      AND status IN ('open', 'active')
+    `).run(defeated ? "finished" : "failed", Date.now(), raidId);
+
+    if (defeated && totalScore > 0) {
+      let paid = 0;
+
+      for (let i = 0; i < ranked.length; i++) {
+        const player = ranked[i];
+        let payout = i === ranked.length - 1
+          ? raid.reward_pool - paid
+          : Math.floor((player.score / totalScore) * raid.reward_pool);
+
+        payout = Math.max(0, payout);
+        paid += payout;
+
+        if (payout > 0) {
+          changeBalance(
+            guildId,
+            player.user_id,
+            payout,
+            "RAID_REWARD",
+            `Raid boss reward | Raid: ${raidId}`
+          );
+        }
+      }
+    } else {
+      for (const player of players) {
+        changeBalance(
+          guildId,
+          player.user_id,
+          raid.join_fee,
+          "RAID_REFUND",
+          `Raid failed/not enough players refund | Raid: ${raidId}`
+        );
+      }
+    }
+  });
+
+  finishTx();
+
+  const rewardLines = ranked.length
+    ? ranked.map((p, i) => {
+        const pct = totalScore > 0 ? p.score / totalScore : 0;
+        const reward = defeated ? Math.floor(pct * raid.reward_pool) : raid.join_fee;
+        return `**#${i + 1}** <@${p.user_id}> — Score **${Math.floor(p.score).toLocaleString()}** | Reward **${reward.toLocaleString()}**`;
+      }).join("\n")
+    : "No players.";
+
+  return makeLogEmbed(
+    defeated ? "🏆 Raid Boss Defeated" : "❌ Raid Boss Failed",
+    `**Boss:** ${raid.boss_name}\n` +
+    `🎮 **Raid:** \`${raidId}\`\n` +
+    `💰 **Reward Pool:** ${raid.reward_pool.toLocaleString()} Digital Silver\n` +
+    `${defeated ? "Rewards split by performance." : "Join fees refunded."}\n\n` +
+    `**Final Ranking:**\n${rewardLines}`,
+    defeated ? 0x00ff00 : 0xff0000
+  );
+}
+
+async function checkRaidBosses() {
+  const now = Date.now();
+
+  const expiredOpen = db.prepare(`
+    SELECT *
+    FROM raid_bosses
+    WHERE status = 'open'
+    AND created_at + ? <= ?
+  `).all(RAID_JOIN_WINDOW, now);
+
+  for (const raid of expiredOpen) {
+    const playerCount = db.prepare("SELECT COUNT(*) AS count FROM raid_players WHERE raid_id = ?").get(raid.raid_id).count;
+
+    if (playerCount < RAID_MIN_PLAYERS) {
+      const embed = finishRaidBoss(raid.guild_id, raid.raid_id, false);
+      await logCasino(embed);
+
+      try {
+        const channel = await client.channels.fetch(raid.raid_channel_id);
+        const msg = await channel.messages.fetch(raid.raid_message_id);
+        await msg.edit({ embeds: [embed], components: [] });
+      } catch {}
+
+      try {
+        const channel = await client.channels.fetch(raid.general_channel_id);
+        const msg = await channel.messages.fetch(raid.general_message_id);
+        await msg.edit({ embeds: [embed], components: [] });
+      } catch {}
+    }
+  }
+
+  const expiredActive = db.prepare(`
+    SELECT *
+    FROM raid_bosses
+    WHERE status = 'active'
+    AND ends_at IS NOT NULL
+    AND ends_at <= ?
+  `).all(now);
+
+  for (const raid of expiredActive) {
+    const defeated = raid.boss_hp <= 0;
+    const embed = finishRaidBoss(raid.guild_id, raid.raid_id, defeated);
+    await logCasino(embed);
+
+    try {
+      const channel = await client.channels.fetch(raid.raid_channel_id);
+      const msg = await channel.messages.fetch(raid.raid_message_id);
+      await msg.edit({ embeds: [embed], components: [] });
+    } catch {}
+  }
+}
+
+function startRaidAutoSpawner(client) {
+  setInterval(() => {
+    spawnRaidBoss(client).catch(err => console.error("Auto raid spawn error:", err));
+  }, RAID_SPAWN_INTERVAL);
+}
+// -------- Raid Boss Code End -------
+
 client.once("clientReady", () => {
   console.log(`✅ Logged in as ${client.user.tag} | Version ${BOT_VERSION}`);
 
@@ -596,11 +1265,13 @@ client.once("clientReady", () => {
     status: "online",
     activities: [
       {
-        name: "/withdraw | /coinflip",
+        name: "/withdraw | /coinflip | /blackjack",
         type: ActivityType.Watching
       }
     ]
   });
+
+  startRaidAutoSpawner(client);
 });
 
 function expireOldCoinflips() {
@@ -1887,6 +2558,22 @@ client.on("interactionCreate", async interaction => {
         return handleBlackjackMove(interaction, "split");
       }
 
+      if (interaction.customId.startsWith("raid_join:")) {
+        return handleRaidJoin(interaction);
+      }
+
+      if (interaction.customId.startsWith("raid_attack:")) {
+        return handleRaidAction(interaction, "attack");
+      }
+
+      if (interaction.customId.startsWith("raid_defend:")) {
+        return handleRaidAction(interaction, "defend");
+      }
+
+      if (interaction.customId.startsWith("raid_heal:")) {
+        return handleRaidAction(interaction, "heal");
+      }
+
 
 
 
@@ -2498,6 +3185,60 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
+    if (command === "raidadmin") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
+      }
+
+      const status = interaction.options.getString("status");
+      const enabled = status === "enable";
+
+      setRaidEnabled(guildId, enabled);
+
+      await logCasino(
+        makeLogEmbed(
+          enabled ? "✅ Raid Boss Enabled" : "🛑 Raid Boss Disabled",
+          `🛡️ **Admin:** ${interaction.user}\n📌 **Status:** ${enabled ? "Enabled" : "Disabled"}`,
+          enabled ? 0x00ff00 : 0xff0000
+        )
+      );
+
+      return interaction.reply(
+        enabled
+          ? "✅ Raid boss has been **enabled**."
+          : "🛑 Raid boss has been **disabled**."
+      );
+    }
+
+    if (command === "raidspawn") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
+      }
+
+      if (!isRaidEnabled(guildId)) {
+        return interaction.reply({
+          content: "❌ Raid boss is disabled. Use `/raidadmin status:ENABLE` first.",
+          ephemeral: true
+        });
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      const raid = await spawnRaidBoss(client, guildId);
+
+      if (!raid) {
+        return interaction.editReply("❌ Could not spawn raid boss. Check `RAID_GENERAL_CHANNEL_ID` and `RAID_CHANNEL_ID`.");
+      }
+
+      return interaction.editReply(`✅ Raid boss spawned in <#${process.env.RAID_GENERAL_CHANNEL_ID}>. Players continue in <#${process.env.RAID_CHANNEL_ID}>.`);
+    }
+
     if (command === "dbstats") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
         return interaction.reply({
@@ -2526,6 +3267,10 @@ client.on("interactionCreate", async interaction => {
         "SELECT COUNT(*) AS count FROM withdrawals WHERE guild_id = ? AND status = 'pending'"
       ).get(guildId);
 
+      const activeRaids = db.prepare(
+        "SELECT COUNT(*) AS count FROM raid_bosses WHERE guild_id = ? AND status IN ('open', 'active')"
+      ).get(guildId);
+
       const totalCoins = db.prepare(
         "SELECT COALESCE(SUM(balance), 0) AS total FROM users WHERE guild_id = ?"
       ).get(guildId);
@@ -2541,6 +3286,7 @@ client.on("interactionCreate", async interaction => {
           `🪙 **Open Coinflips:** ${openFlips.count}\n` +
           `✅ **Finished Coinflips:** ${finishedFlips.count}\n` +
           `💸 **Pending Withdrawals:** ${pendingWithdrawals.count}\n` +
+          `👹 **Active/Open Raids:** ${activeRaids.count}\n` +
           `💰 **Total Coins:** ${Number(totalCoins.total).toLocaleString()}\n` +
           `📁 **Database:** \`${dbPath}\`\n` +
           `📌 **SQLite File:** \`${dbFile[0]?.file || "unknown"}\``
@@ -2643,5 +3389,6 @@ async function logCasino(embed, components = []) {
 
 
 setInterval(checkExpiredBlackjackGames, 60_000);
+setInterval(checkRaidBosses, 60_000);
 
 client.login(process.env.TOKEN);
