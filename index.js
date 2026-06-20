@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "3.4.2";
+const BOT_VERSION = "3.4.3";
 const MAX_BET = 1_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
@@ -748,7 +748,12 @@ function raidJoinButton(raidId) {
     new ButtonBuilder()
       .setCustomId(`raid_join:${raidId}`)
       .setLabel("Join Raid")
-      .setStyle(ButtonStyle.Success)
+      .setStyle(ButtonStyle.Success),
+
+    new ButtonBuilder()
+      .setCustomId(`raid_cancel:${raidId}`)
+      .setLabel("Cancel Raid")
+      .setStyle(ButtonStyle.Danger)
   );
 }
 
@@ -1058,6 +1063,118 @@ async function handleRaidJoin(interaction) {
     content:
       `✅ You joined the raid. **${raid.join_fee.toLocaleString()} Digital Silver** locked as join fee.\n` +
       `Continue the fight here: <#${raid.raid_channel_id}>`,
+    ephemeral: true
+  });
+}
+
+async function handleRaidCancelButton(interaction) {
+  const guildId = interaction.guild.id;
+  const raidId = interaction.customId.replace("raid_cancel:", "");
+
+  if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      content: "❌ Only admins can cancel raids.",
+      ephemeral: true
+    });
+  }
+
+  const raid = db.prepare(`
+    SELECT *
+    FROM raid_bosses
+    WHERE raid_id = ?
+    AND guild_id = ?
+  `).get(raidId, guildId);
+
+  if (!raid || !["open", "active"].includes(raid.status)) {
+    return interaction.reply({
+      content: "❌ This raid is already finished/cancelled.",
+      ephemeral: true
+    });
+  }
+
+  const players = db.prepare(`
+    SELECT *
+    FROM raid_players
+    WHERE raid_id = ?
+  `).all(raidId);
+
+  const cancelTx = db.transaction(() => {
+    const fresh = db.prepare(`
+      SELECT *
+      FROM raid_bosses
+      WHERE raid_id = ?
+    `).get(raidId);
+
+    if (!fresh || !["open", "active"].includes(fresh.status)) {
+      throw new Error("Raid already handled.");
+    }
+
+    db.prepare(`
+      UPDATE raid_bosses
+      SET status = 'cancelled',
+          updated_at = ?
+      WHERE raid_id = ?
+      AND status IN ('open', 'active')
+    `).run(Date.now(), raidId);
+
+    for (const player of players) {
+      changeBalance(
+        guildId,
+        player.user_id,
+        raid.join_fee,
+        "RAID_CANCEL_REFUND",
+        `Raid cancelled by admin button ${interaction.user.tag} | Raid: ${raidId}`
+      );
+    }
+  });
+
+  try {
+    cancelTx();
+  } catch (err) {
+    return interaction.reply({
+      content: "❌ This raid is already handled.",
+      ephemeral: true
+    });
+  }
+
+  const embed = makeLogEmbed(
+    "🚫 Raid Boss Cancelled",
+    `**Boss:** ${raid.boss_name}\n` +
+    `🎮 **Raid:** \`${raidId}\`\n` +
+    `🛡️ **Cancelled By:** ${interaction.user}\n` +
+    `👥 **Players Refunded:** ${players.length}\n` +
+    `💰 **Refund Each:** ${raid.join_fee.toLocaleString()} Digital Silver\n` +
+    `💰 **Total Refunded:** ${(players.length * raid.join_fee).toLocaleString()} Digital Silver`,
+    0x808080
+  );
+
+  await logCasino(embed);
+
+  if (raid.raid_channel_id && raid.raid_message_id) {
+    try {
+      const channel = await client.channels.fetch(raid.raid_channel_id);
+      const msg = await channel.messages.fetch(raid.raid_message_id);
+      await msg.edit({ embeds: [embed], components: [] });
+    } catch (err) {
+      console.error("Could not update cancelled raid message:", err);
+    }
+  }
+
+  if (raid.general_channel_id && raid.general_message_id) {
+    try {
+      const channel = await client.channels.fetch(raid.general_channel_id);
+      const msg = await channel.messages.fetch(raid.general_message_id);
+      await msg.edit({ embeds: [embed], components: [] });
+    } catch (err) {
+      console.error("Could not update cancelled general raid message:", err);
+    }
+  }
+
+  return interaction.reply({
+    content:
+      `✅ Raid cancelled.\n` +
+      `👥 Refunded **${players.length}** players.\n` +
+      `💰 Total refunded: **${(players.length * raid.join_fee).toLocaleString()} Digital Silver**`,
     ephemeral: true
   });
 }
@@ -2600,6 +2717,10 @@ client.on("interactionCreate", async interaction => {
 
       if (interaction.customId.startsWith("raid_join:")) {
         return handleRaidJoin(interaction);
+      }
+
+      if (interaction.customId.startsWith("raid_cancel:")) {
+        return handleRaidCancelButton(interaction);
       }
 
       if (interaction.customId.startsWith("raid_attack:")) {
