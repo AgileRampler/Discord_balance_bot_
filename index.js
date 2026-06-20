@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "3.4.0";
+const BOT_VERSION = "3.4.1";
 const MAX_BET = 5_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
@@ -145,6 +145,41 @@ CREATE TABLE IF NOT EXISTS raid_players (
 )
 `).run();
 // -------- Raid Boss Code End -------
+
+
+// -------- Blackjack Code Tables -------
+db.prepare(`
+CREATE TABLE IF NOT EXISTS blackjack_games (
+  game_id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT,
+  host_id TEXT NOT NULL,
+  buyin INTEGER NOT NULL,
+  status TEXT DEFAULT 'open',
+  dealer_hand TEXT,
+  current_turn_index INTEGER DEFAULT 0,
+  pot INTEGER DEFAULT 0,
+  winners TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER,
+  expires_at INTEGER
+)
+`).run();
+
+db.prepare(`
+CREATE TABLE IF NOT EXISTS blackjack_players (
+  game_id TEXT NOT NULL,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  hands TEXT,
+  active_hand_index INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'playing',
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (game_id, user_id)
+)
+`).run();
+// -------- Blackjack Code Tables End -------
 
 db.prepare(`
 CREATE TABLE IF NOT EXISTS transactions (
