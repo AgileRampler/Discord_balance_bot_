@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "3.4.1";
+const BOT_VERSION = "3.4.2";
 const MAX_BET = 1_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
@@ -653,6 +653,11 @@ const commands = [
   new SlashCommandBuilder()
     .setName("raidspawn")
     .setDescription("Admin only: manually spawn a raid boss")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("raidcancel")
+    .setDescription("Admin only: cancel the current open/active raid and refund players")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
@@ -3218,6 +3223,117 @@ client.on("interactionCreate", async interaction => {
       ).run(msg.id, gameId);
 
       return;
+    }
+
+    if (command === "raidcancel") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({
+          content: "❌ Only admins can use this.",
+          ephemeral: true
+        });
+      }
+
+      const raid = db.prepare(`
+        SELECT *
+        FROM raid_bosses
+        WHERE guild_id = ?
+        AND status IN ('open', 'active')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(guildId);
+
+      if (!raid) {
+        return interaction.reply({
+          content: "❌ No open or active raid found.",
+          ephemeral: true
+        });
+      }
+
+      const players = db.prepare(`
+        SELECT *
+        FROM raid_players
+        WHERE raid_id = ?
+      `).all(raid.raid_id);
+
+      const cancelTx = db.transaction(() => {
+        const fresh = db.prepare(`
+          SELECT *
+          FROM raid_bosses
+          WHERE raid_id = ?
+        `).get(raid.raid_id);
+
+        if (!fresh || !["open", "active"].includes(fresh.status)) {
+          throw new Error("Raid already handled.");
+        }
+
+        db.prepare(`
+          UPDATE raid_bosses
+          SET status = 'cancelled',
+              updated_at = ?
+          WHERE raid_id = ?
+          AND status IN ('open', 'active')
+        `).run(Date.now(), raid.raid_id);
+
+        for (const player of players) {
+          changeBalance(
+            guildId,
+            player.user_id,
+            raid.join_fee,
+            "RAID_CANCEL_REFUND",
+            `Raid cancelled by admin ${interaction.user.tag} | Raid: ${raid.raid_id}`
+          );
+        }
+      });
+
+      try {
+        cancelTx();
+      } catch (err) {
+        return interaction.reply({
+          content: "❌ This raid is already handled.",
+          ephemeral: true
+        });
+      }
+
+      const embed = makeLogEmbed(
+        "🚫 Raid Boss Cancelled",
+        `**Boss:** ${raid.boss_name}\n` +
+        `🎮 **Raid:** \`${raid.raid_id}\`\n` +
+        `🛡️ **Cancelled By:** ${interaction.user}\n` +
+        `👥 **Players Refunded:** ${players.length}\n` +
+        `💰 **Refund Each:** ${raid.join_fee.toLocaleString()} Digital Silver\n` +
+        `💰 **Total Refunded:** ${(players.length * raid.join_fee).toLocaleString()} Digital Silver`,
+        0x808080
+      );
+
+      await logCasino(embed);
+
+      if (raid.raid_channel_id && raid.raid_message_id) {
+        try {
+          const channel = await client.channels.fetch(raid.raid_channel_id);
+          const msg = await channel.messages.fetch(raid.raid_message_id);
+          await msg.edit({ embeds: [embed], components: [] });
+        } catch (err) {
+          console.error("Could not update cancelled raid message:", err);
+        }
+      }
+
+      if (raid.general_channel_id && raid.general_message_id) {
+        try {
+          const channel = await client.channels.fetch(raid.general_channel_id);
+          const msg = await channel.messages.fetch(raid.general_message_id);
+          await msg.edit({ embeds: [embed], components: [] });
+        } catch (err) {
+          console.error("Could not update cancelled general raid message:", err);
+        }
+      }
+
+      return interaction.reply({
+        content:
+          `✅ Raid cancelled.\n` +
+          `👥 Refunded **${players.length}** players.\n` +
+          `💰 Total refunded: **${(players.length * raid.join_fee).toLocaleString()} Digital Silver**`,
+        ephemeral: true
+      });
     }
 
     if (command === "raidadmin") {
