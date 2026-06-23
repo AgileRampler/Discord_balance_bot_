@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "3.5.0";
+const BOT_VERSION = "3.5.1";
 const MAX_BET = 1_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
@@ -768,7 +768,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("blackjack")
-    .setDescription("Admin host: create a 4-player blackjack table")
+    .setDescription("Admin host: create a 4-player PvP blackjack table")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addIntegerOption(o =>
       o.setName("buyin")
@@ -2340,7 +2340,12 @@ function bjActionButtons(gameId, canSplit) {
       .setCustomId(`bj_split:${gameId}`)
       .setLabel("Split")
       .setStyle(ButtonStyle.Success)
-      .setDisabled(!canSplit)
+      .setDisabled(!canSplit),
+
+    new ButtonBuilder()
+      .setCustomId(`bj_view:${gameId}`)
+      .setLabel("View My Hand")
+      .setStyle(ButtonStyle.Secondary)
   );
 }
 
@@ -2360,12 +2365,11 @@ function bjLobbyEmbed(game, players) {
       `**Prize Pool:** ${(game.buyin * players.length).toLocaleString()} Digital Silver\n` +
       `⏰ **Lobby Expires:** <t:${expireUnix}:R>\n\n` +
       `**Players:**\n${list}\n\n` +
-      `Minimum **2 players** required. Only the host/admin can start or cancel.`
+      `Minimum **2 players** required. PvP mode: highest hand wins the pot. No dealer, no pot burn.`
     );
 }
 
 function bjGameEmbed(game, players, logText = "") {
-  const dealerHand = bjParse(game.dealer_hand, []);
   const current = players[game.current_turn_index];
   const expireUnix = Math.floor((game.expires_at || Date.now() + BLACKJACK_TURN_TIMEOUT) / 1000);
 
@@ -2374,23 +2378,23 @@ function bjGameEmbed(game, players, logText = "") {
     const handLines = hands.map((h, hIndex) => {
       const marker = index === game.current_turn_index && hIndex === p.active_hand_index ? "👉 " : "";
       const value = bjHandValue(h.cards);
-      const state = h.done ? "✅" : bjIsBust(h.cards) ? "💥 Bust" : "";
-      return `${marker}Hand ${hIndex + 1}: ${bjCardsText(h.cards)} = **${value}** ${state}`;
-    }).join("\n");
+      const state = h.done ? "✅ Stayed" : value > 21 ? "💥 Bust" : "⏳ Playing";
+      return `${marker}Hand ${hIndex + 1}: **${h.cards.length} cards** — ${state}`;
+    }).join("\\n");
 
-    return `**${index + 1}. <@${p.user_id}>**\n${handLines}`;
-  }).join("\n\n");
+    return `**${index + 1}. <@${p.user_id}>**\\n${handLines}`;
+  }).join("\\n\\n");
 
   return new EmbedBuilder()
-    .setTitle("🃏 Blackjack Game")
+    .setTitle("🃏 PvP Blackjack")
     .setColor(0xff3b3b)
     .setDescription(
-      `**Dealer:** ${bjCardsText(dealerHand, true)}\n` +
-      `**Pot:** ${game.pot.toLocaleString()} Digital Silver\n\n` +
-      `${playerText}\n\n` +
-      `🎯 **Turn:** ${current ? `<@${current.user_id}>` : "Dealer"}\n` +
-      `⏰ **Auto Stay:** <t:${expireUnix}:R>\n\n` +
-      `${logText ? `**Last Action:**\n${logText}` : "Choose: Hit, Stay, or Split."}`
+      `**Mode:** Player vs Player — No dealer / no pot burn\\n` +
+      `**Pot:** ${game.pot.toLocaleString()} Digital Silver\\n\\n` +
+      `${playerText}\\n\\n` +
+      `🎯 **Turn:** ${current ? `<@${current.user_id}>` : "Resolving..."}\\n` +
+      `⏰ **Auto Stay:** <t:${expireUnix}:R>\\n\\n` +
+      `${logText ? `**Last Action:**\\n${logText}` : "Cards are hidden. Use **View My Hand** to see your cards."}`
     );
 }
 
@@ -2403,6 +2407,54 @@ function bjCanSplit(player) {
   if (hand.cards.length !== 2) return false;
 
   return hand.cards[0].value === hand.cards[1].value;
+}
+
+
+function bjPrivateHandText(player) {
+  const hands = bjParse(player.hands, []);
+
+  if (!hands.length) return "No cards dealt yet.";
+
+  return hands.map((h, i) => {
+    const value = bjHandValue(h.cards);
+    const state = value > 21 ? "💥 Bust" : h.done ? "✅ Stayed" : "⏳ Playing";
+    return `**Hand ${i + 1}:** ${bjCardsText(h.cards)} = **${value}** ${state}`;
+  }).join("\\n");
+}
+
+async function handleBlackjackView(interaction) {
+  const gameId = interaction.customId.replace("bj_view:", "");
+  const game = db.prepare("SELECT * FROM blackjack_games WHERE game_id = ?").get(gameId);
+
+  if (!game || game.status !== "active") {
+    return interaction.reply({
+      content: "❌ This blackjack game is not active.",
+      ephemeral: true
+    });
+  }
+
+  const player = db.prepare(
+    "SELECT * FROM blackjack_players WHERE game_id = ? AND user_id = ?"
+  ).get(gameId, interaction.user.id);
+
+  if (!player) {
+    return interaction.reply({
+      content: "❌ You are not in this blackjack game.",
+      ephemeral: true
+    });
+  }
+
+  const players = db.prepare(
+    "SELECT * FROM blackjack_players WHERE game_id = ? ORDER BY joined_at ASC"
+  ).all(gameId);
+  const current = players[game.current_turn_index];
+
+  return interaction.reply({
+    content:
+      `🃏 **Your Blackjack Hand**\\n\\n${bjPrivateHandText(player)}\\n\\n` +
+      `🎯 Current turn: ${current ? `<@${current.user_id}>` : "Resolving..."}`,
+    ephemeral: true
+  });
 }
 
 function bjNextTurn(gameId) {
@@ -2446,28 +2498,7 @@ function bjResolveGame(guildId, gameId) {
     "SELECT * FROM blackjack_players WHERE game_id = ? ORDER BY joined_at ASC"
   ).all(gameId);
 
-  let dealerHand = bjParse(game.dealer_hand, []);
-  const usedCards = [];
-
-  for (const card of dealerHand) usedCards.push(card.text);
-  for (const player of players) {
-    for (const hand of bjParse(player.hands, [])) {
-      for (const card of hand.cards) usedCards.push(card.text);
-    }
-  }
-
-  const deck = bjCreateDeck().filter(card => !usedCards.includes(card.text));
-
-  while (bjHandValue(dealerHand) < 17) {
-    dealerHand.push(deck.pop());
-  }
-
-  const dealerValue = bjHandValue(dealerHand);
-  const dealerBust = dealerValue > 21;
-
-  const winners = [];
-
-  for (const player of players) {
+  const results = players.map(player => {
     const hands = bjParse(player.hands, []);
     let best = 0;
 
@@ -2476,10 +2507,15 @@ function bjResolveGame(guildId, gameId) {
       if (value <= 21 && value > best) best = value;
     }
 
-    if (best > 0 && (dealerBust || best > dealerValue)) {
-      winners.push({ user_id: player.user_id, best });
-    }
-  }
+    return {
+      user_id: player.user_id,
+      best,
+      hands
+    };
+  });
+
+  const highest = Math.max(...results.map(r => r.best), 0);
+  const winners = highest > 0 ? results.filter(r => r.best === highest) : [];
 
   const resultTx = db.transaction(() => {
     db.prepare(`
@@ -2489,57 +2525,62 @@ function bjResolveGame(guildId, gameId) {
           winners = ?,
           updated_at = ?
       WHERE game_id = ?
-    `).run(JSON.stringify(dealerHand), JSON.stringify(winners.map(w => w.user_id)), Date.now(), gameId);
+    `).run(JSON.stringify([]), JSON.stringify(winners.map(w => w.user_id)), Date.now(), gameId);
 
     if (winners.length > 0) {
       const payout = Math.floor(game.pot / winners.length);
+      let paid = 0;
 
-      for (const winner of winners) {
+      for (let i = 0; i < winners.length; i++) {
+        const winner = winners[i];
+        const amount = i === winners.length - 1 ? game.pot - paid : payout;
+        paid += amount;
+
         changeBalance(
           guildId,
           winner.user_id,
-          payout,
+          amount,
           "BLACKJACK_WIN",
-          `Won blackjack | Game: ${gameId}`
+          `Won PvP blackjack | Game: ${gameId}`
         );
       }
     } else {
-      logTransaction(
-        guildId,
-        game.host_id,
-        "BLACKJACK_DEALER_WIN",
-        0,
-        `Dealer won blackjack pot | Game: ${gameId}`
-      );
+      for (const player of players) {
+        changeBalance(
+          guildId,
+          player.user_id,
+          game.buyin,
+          "BLACKJACK_ALL_BUST_REFUND",
+          `PvP blackjack all players bust refund | Game: ${gameId}`
+        );
+      }
     }
   });
 
   resultTx();
 
-  const playerResults = players.map(p => {
-    const hands = bjParse(p.hands, []);
-    const handText = hands.map((h, i) => {
+  const playerResults = results.map(r => {
+    const handText = r.hands.map((h, i) => {
       const value = bjHandValue(h.cards);
       return `Hand ${i + 1}: ${bjCardsText(h.cards)} = ${value}${value > 21 ? " Bust" : ""}`;
     }).join(" | ");
 
-    return `<@${p.user_id}> — ${handText}`;
-  }).join("\n");
+    return `<@${r.user_id}> — Best: **${r.best || "Bust"}** — ${handText}`;
+  }).join("\\n");
 
   const payoutText = winners.length
     ? winners.map(w => `<@${w.user_id}>`).join(", ")
-    : "Dealer won. No player payout.";
+    : "No winner. Everyone busted, so all buy-ins were refunded.";
 
-  const payoutAmount = winners.length ? Math.floor(game.pot / winners.length) : 0;
+  const payoutAmount = winners.length ? Math.floor(game.pot / winners.length) : game.buyin;
 
   return makeLogEmbed(
-    "🏆 Blackjack Finished",
-    `**Dealer:** ${bjCardsText(dealerHand)} = ${dealerValue}${dealerBust ? " Bust" : ""}\n` +
-    `💰 **Pot:** ${game.pot.toLocaleString()} Digital Silver\n` +
-    `🥇 **Winner(s):** ${payoutText}\n` +
-    `${winners.length ? `💸 **Payout Each:** ${payoutAmount.toLocaleString()} Digital Silver\n` : ""}\n` +
-    `**Results:**\n${playerResults}`,
-    winners.length ? 0x00ff00 : 0xff0000
+    winners.length ? "🏆 PvP Blackjack Finished" : "🤝 PvP Blackjack Refunded",
+    `💰 **Pot:** ${game.pot.toLocaleString()} Digital Silver\\n` +
+    `🥇 **Winner(s):** ${payoutText}\\n` +
+    `${winners.length ? `💸 **Payout Each:** ${payoutAmount.toLocaleString()} Digital Silver\\n` : `💸 **Refund Each:** ${payoutAmount.toLocaleString()} Digital Silver\\n`}\\n` +
+    `**Results:**\\n${playerResults}`,
+    winners.length ? 0x00ff00 : 0x808080
   );
 }
 
@@ -2730,7 +2771,7 @@ async function handleBlackjackStart(interaction) {
   }
 
   const deck = bjCreateDeck();
-  const dealerHand = [deck.pop(), deck.pop()];
+  const dealerHand = [];
 
   const startTx = db.transaction(() => {
     for (const player of players) {
@@ -2764,13 +2805,13 @@ async function handleBlackjackStart(interaction) {
 
   await logCasino(
     makeLogEmbed(
-      "🃏 Blackjack Started",
+      "🃏 PvP Blackjack Started",
       `🎮 **Game:** \`${gameId}\`\n👥 **Players:** ${players.length}\n💰 **Pot:** ${game.pot.toLocaleString()} Digital Silver`
     )
   );
 
   return interaction.update({
-    embeds: [bjGameEmbed(updated, updatedPlayers, "Blackjack started!")],
+    embeds: [bjGameEmbed(updated, updatedPlayers, "PvP Blackjack started! Cards are hidden. Click **View My Hand**.")],
     components: [bjActionButtons(gameId, bjCanSplit(updatedPlayers[0]))]
   });
 }
@@ -2878,7 +2919,20 @@ async function handleBlackjackMove(interaction, move) {
 
   await updateBlackjackMessage(gameId, logText);
 
-  return interaction.deferUpdate().catch(() => {});
+  await interaction.deferUpdate().catch(() => {});
+
+  const updatedPlayer = db.prepare(
+    "SELECT * FROM blackjack_players WHERE game_id = ? AND user_id = ?"
+  ).get(gameId, interaction.user.id);
+
+  if (updatedPlayer) {
+    await interaction.followUp({
+      content: `🃏 **Your Updated Hand**\n\n${bjPrivateHandText(updatedPlayer)}`,
+      ephemeral: true
+    }).catch(() => {});
+  }
+
+  return;
 }
 
 async function checkExpiredBlackjackGames() {
@@ -3043,6 +3097,10 @@ client.on("interactionCreate", async interaction => {
 
       if (interaction.customId.startsWith("bj_split:")) {
         return handleBlackjackMove(interaction, "split");
+      }
+
+      if (interaction.customId.startsWith("bj_view:")) {
+        return handleBlackjackView(interaction);
       }
 
       if (interaction.customId.startsWith("raid_join:")) {
