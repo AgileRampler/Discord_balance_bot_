@@ -2371,15 +2371,21 @@ function bjLobbyEmbed(game, players) {
 
 function bjGameEmbed(game, players, logText = "") {
   const current = players[game.current_turn_index];
-  const expireUnix = Math.floor((game.expires_at || Date.now() + BLACKJACK_TURN_TIMEOUT) / 1000);
+  const expireUnix = Math.floor(
+    (game.expires_at || Date.now() + BLACKJACK_TURN_TIMEOUT) / 1000
+  );
 
   const playerText = players.map((p, index) => {
     const hands = bjParse(p.hands, []);
+
     const handLines = hands.map((h, hIndex) => {
-      const marker = index === game.current_turn_index && hIndex === p.active_hand_index ? "👉 " : "";
-      const value = bjHandValue(h.cards);
-      const state = h.done ? "✅ Stayed" : value > 21 ? "💥 Bust" : "⏳ Playing";
-      return `${marker}Hand ${hIndex + 1}: **${h.cards.length} cards** — ${state}`;
+      const marker =
+        index === game.current_turn_index &&
+        hIndex === p.active_hand_index
+          ? "👉 "
+          : "";
+
+      return `${marker}Hand ${hIndex + 1}`;
     }).join("\n");
 
     return `**${index + 1}. <@${p.user_id}>**\n${handLines}`;
