@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "3.5.1";
+const BOT_VERSION = "3.5.2";
 const MAX_BET = 1_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
@@ -2380,21 +2380,21 @@ function bjGameEmbed(game, players, logText = "") {
       const value = bjHandValue(h.cards);
       const state = h.done ? "✅ Stayed" : value > 21 ? "💥 Bust" : "⏳ Playing";
       return `${marker}Hand ${hIndex + 1}: **${h.cards.length} cards** — ${state}`;
-    }).join("\\n");
+    }).join("\n");
 
-    return `**${index + 1}. <@${p.user_id}>**\\n${handLines}`;
-  }).join("\\n\\n");
+    return `**${index + 1}. <@${p.user_id}>**\n${handLines}`;
+  }).join("\n\n");
 
   return new EmbedBuilder()
     .setTitle("🃏 PvP Blackjack")
     .setColor(0xff3b3b)
     .setDescription(
-      `**Mode:** Player vs Player — No dealer / no pot burn\\n` +
-      `**Pot:** ${game.pot.toLocaleString()} Digital Silver\\n\\n` +
-      `${playerText}\\n\\n` +
-      `🎯 **Turn:** ${current ? `<@${current.user_id}>` : "Resolving..."}\\n` +
-      `⏰ **Auto Stay:** <t:${expireUnix}:R>\\n\\n` +
-      `${logText ? `**Last Action:**\\n${logText}` : "Cards are hidden. Use **View My Hand** to see your cards."}`
+      `**Mode:** Player vs Player — No dealer / no pot burn\n` +
+      `**Pot:** ${game.pot.toLocaleString()} Digital Silver\n\n` +
+      `${playerText}\n\n` +
+      `🎯 **Turn:** ${current ? `<@${current.user_id}>` : "Resolving..."}\n` +
+      `⏰ **Auto Stay:** <t:${expireUnix}:R>\n\n` +
+      `${logText ? `**Last Action:**\n${logText}` : "Cards are hidden. Use **View My Hand** to see your cards."}`
     );
 }
 
@@ -2419,7 +2419,7 @@ function bjPrivateHandText(player) {
     const value = bjHandValue(h.cards);
     const state = value > 21 ? "💥 Bust" : h.done ? "✅ Stayed" : "⏳ Playing";
     return `**Hand ${i + 1}:** ${bjCardsText(h.cards)} = **${value}** ${state}`;
-  }).join("\\n");
+  }).join("\n");
 }
 
 async function handleBlackjackView(interaction) {
@@ -2451,7 +2451,7 @@ async function handleBlackjackView(interaction) {
 
   return interaction.reply({
     content:
-      `🃏 **Your Blackjack Hand**\\n\\n${bjPrivateHandText(player)}\\n\\n` +
+      `🃏 **Your Blackjack Hand**\n\n${bjPrivateHandText(player)}\n\n` +
       `🎯 Current turn: ${current ? `<@${current.user_id}>` : "Resolving..."}`,
     ephemeral: true
   });
@@ -2559,29 +2559,48 @@ function bjResolveGame(guildId, gameId) {
 
   resultTx();
 
-  const playerResults = results.map(r => {
+  const payoutAmount = winners.length ? Math.floor(game.pot / winners.length) : game.buyin;
+  const winnersText = winners.length
+    ? winners.map(w => `<@${w.user_id}>`).join(", ")
+    : "No winner — everyone busted.";
+
+  const resultLines = results.map((r, index) => {
     const handText = r.hands.map((h, i) => {
       const value = bjHandValue(h.cards);
-      return `Hand ${i + 1}: ${bjCardsText(h.cards)} = ${value}${value > 21 ? " Bust" : ""}`;
-    }).join(" | ");
+      const bustText = value > 21 ? " 💥 Bust" : "";
+      return `Hand ${i + 1}: ${bjCardsText(h.cards)} = ${value}${bustText}`;
+    }).join("\n");
 
-    return `<@${r.user_id}> — Best: **${r.best || "Bust"}** — ${handText}`;
-  }).join("\\n");
+    return `**#${index + 1} <@${r.user_id}>**\nBest: **${r.best || "Bust"}**\n${handText}`;
+  }).join("\n\n");
 
-  const payoutText = winners.length
-    ? winners.map(w => `<@${w.user_id}>`).join(", ")
-    : "No winner. Everyone busted, so all buy-ins were refunded.";
+  const embed = new EmbedBuilder()
+    .setTitle(winners.length ? "🏆 PvP Blackjack Finished" : "🤝 PvP Blackjack Refunded")
+    .setColor(winners.length ? 0x00ff00 : 0x808080)
+    .addFields(
+      {
+        name: "💰 Pot",
+        value: `${game.pot.toLocaleString()} Digital Silver`,
+        inline: true
+      },
+      {
+        name: winners.length ? "🥇 Winner(s)" : "🤝 Refund",
+        value: winners.length ? winnersText : "Everyone busted, buy-ins refunded.",
+        inline: true
+      },
+      {
+        name: winners.length ? "💸 Payout Each" : "💸 Refund Each",
+        value: `${payoutAmount.toLocaleString()} Digital Silver`,
+        inline: true
+      },
+      {
+        name: "📋 Final Results",
+        value: resultLines.slice(0, 3900)
+      }
+    )
+    .setTimestamp();
 
-  const payoutAmount = winners.length ? Math.floor(game.pot / winners.length) : game.buyin;
-
-  return makeLogEmbed(
-    winners.length ? "🏆 PvP Blackjack Finished" : "🤝 PvP Blackjack Refunded",
-    `💰 **Pot:** ${game.pot.toLocaleString()} Digital Silver\\n` +
-    `🥇 **Winner(s):** ${payoutText}\\n` +
-    `${winners.length ? `💸 **Payout Each:** ${payoutAmount.toLocaleString()} Digital Silver\\n` : `💸 **Refund Each:** ${payoutAmount.toLocaleString()} Digital Silver\\n`}\\n` +
-    `**Results:**\\n${playerResults}`,
-    winners.length ? 0x00ff00 : 0x808080
-  );
+  return embed;
 }
 
 async function updateBlackjackMessage(gameId, logText = "") {
