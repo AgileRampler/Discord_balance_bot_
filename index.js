@@ -21,7 +21,7 @@ console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
 
-const BOT_VERSION = "3.4.3";
+const BOT_VERSION = "3.5.0";
 const MAX_BET = 1_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
@@ -31,7 +31,7 @@ const MAX_BLACKJACK_BUYIN = 1_000_000;
 const MAX_BLACKJACK_PLAYERS = 4;
 const BLACKJACK_LOBBY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const BLACKJACK_TURN_TIMEOUT = 2 * 60 * 1000; // 2 minutes
-const RAID_JOIN_FEE = 200_000;
+const RAID_JOIN_FEE = 100_000;
 const RAID_MIN_PLAYERS = 5;
 const RAID_MAX_PLAYERS = 30;
 const RAID_BOSS_HP = 50_000;
@@ -39,6 +39,12 @@ const RAID_JOIN_WINDOW = 10 * 60 * 1000; // 10 minutes
 const RAID_DURATION = 10 * 60 * 1000; // 10 minutes
 const RAID_ACTION_COOLDOWN = 10 * 1000; // 10 seconds
 const RAID_SPAWN_INTERVAL = 8 * 60 * 60 * 1000; // 3 times per 24 hours
+const MIN_TRANSFER = 1;
+const MIN_DUEL_BET = 100_000;
+const MAX_DUEL_BET = 1_000_000;
+const DUEL_START_HP = 100;
+const DUEL_LOBBY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const DUEL_TURN_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 db.pragma("journal_mode = WAL");
 
@@ -50,6 +56,12 @@ CREATE TABLE IF NOT EXISTS users (
   PRIMARY KEY (guild_id, user_id)
 )
 `).run();
+
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN coinflip_streak INTEGER DEFAULT 0").run();
+} catch (err) {
+  if (!String(err.message).includes("duplicate column name")) console.error(err);
+}
 
 db.prepare(`
 CREATE TABLE IF NOT EXISTS settings (
@@ -107,6 +119,41 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 
 
 
+
+// -------- Duel Code Tables -------
+db.prepare(`
+CREATE TABLE IF NOT EXISTS duels (
+  duel_id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT,
+  creator_id TEXT NOT NULL,
+  opponent_id TEXT,
+  bet INTEGER NOT NULL,
+  creator_hp INTEGER DEFAULT 100,
+  opponent_hp INTEGER DEFAULT 100,
+  turn_user_id TEXT,
+  status TEXT DEFAULT 'open',
+  winner_id TEXT,
+  last_action_at INTEGER,
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
+)
+`).run();
+
+try {
+  db.prepare("ALTER TABLE duels ADD COLUMN last_action_at INTEGER").run();
+} catch (err) {
+  if (!String(err.message).includes("duplicate column name")) console.error(err);
+}
+
+try {
+  db.prepare("ALTER TABLE duels ADD COLUMN expires_at INTEGER").run();
+} catch (err) {
+  if (!String(err.message).includes("duplicate column name")) console.error(err);
+}
+// -------- Duel Code Tables End -------
 
 // -------- Raid Boss Code -------
 db.prepare(`
@@ -227,6 +274,42 @@ function logTransaction(guildId, userId, type, amount, reason = "") {
 function changeBalance(guildId, userId, amount, type, reason = "") {
   addBal(guildId, userId, amount);
   logTransaction(guildId, userId, type, amount, reason);
+}
+
+function getCoinflipStreak(guildId, userId) {
+  getBal(guildId, userId);
+  const row = db.prepare("SELECT coinflip_streak FROM users WHERE guild_id = ? AND user_id = ?").get(guildId, userId);
+  return Number(row?.coinflip_streak || 0);
+}
+
+function setCoinflipStreak(guildId, userId, streak) {
+  getBal(guildId, userId);
+  db.prepare("UPDATE users SET coinflip_streak = ? WHERE guild_id = ? AND user_id = ?").run(streak, guildId, userId);
+}
+
+function getStreakComment(streak) {
+  if (streak >= 20) return "☠️ The House Fears You!";
+  if (streak >= 15) return "🐉 Legendary Gambler!";
+  if (streak >= 10) return "💎 Silver Addict!";
+  if (streak >= 7) return "👑 Casino King!";
+  if (streak >= 5) return "⚡ Unstoppable!";
+  if (streak >= 3) return "🔥 You're On Fire!";
+  if (streak >= 2) return "🔥 Heating Up!";
+  if (streak >= 1) return "🎯 Lucky Start!";
+  return "No active streak.";
+}
+
+function transferBalance(guildId, fromUserId, toUserId, amount, sentType, receivedType, reason) {
+  const fromBalance = getBal(guildId, fromUserId);
+  if (amount <= 0) throw new Error("Amount must be more than 0.");
+  if (fromUserId === toUserId) throw new Error("You cannot transfer to the same user.");
+  if (fromBalance < amount) throw new Error("Insufficient balance.");
+
+  const tx = db.transaction(() => {
+    changeBalance(guildId, fromUserId, -amount, sentType, reason);
+    changeBalance(guildId, toUserId, amount, receivedType, reason);
+  });
+  tx();
 }
 
 async function logToChannel(client, embed, components = []) {
@@ -524,6 +607,35 @@ function makeTransactionsPage(guildId, page = 0) {
   return { embed, page: safePage, maxPage };
 }
 
+function makeStreakboardPage(guildId, page = 0) {
+  const perPage = 10;
+  const total = db.prepare("SELECT COUNT(*) AS count FROM users WHERE guild_id = ? AND COALESCE(coinflip_streak, 0) > 0").get(guildId).count;
+  const maxPage = Math.max(0, Math.ceil(total / perPage) - 1);
+  const safePage = Math.max(0, Math.min(page, maxPage));
+
+  const rows = db.prepare(`
+    SELECT user_id, coinflip_streak
+    FROM users
+    WHERE guild_id = ?
+    AND COALESCE(coinflip_streak, 0) > 0
+    ORDER BY coinflip_streak DESC
+    LIMIT ? OFFSET ?
+  `).all(guildId, perPage, safePage * perPage);
+
+  const text = rows.length
+    ? rows.map((r, i) => `**#${safePage * perPage + i + 1}** <@${r.user_id}> — **${Number(r.coinflip_streak || 0).toLocaleString()} wins** 🔥`).join("\n")
+    : "No active coinflip streaks found.";
+
+  const embed = new EmbedBuilder()
+    .setTitle("🔥 Coinflip Streak Leaderboard")
+    .setDescription(text)
+    .setColor(0xff3b3b)
+    .setFooter({ text: `Page ${safePage + 1}/${maxPage + 1} • Total streaks: ${total}` });
+
+  return { embed, page: safePage, maxPage };
+}
+
+
 const commands = [
   new SlashCommandBuilder()
     .setName("version")
@@ -594,6 +706,48 @@ const commands = [
       o.setName("amount")
         .setDescription("Number, all, or percentage like 10%")
         .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("transfer")
+    .setDescription("Transfer Digital Silver to another user")
+    .addUserOption(o =>
+      o.setName("user").setDescription("User to receive coins").setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName("amount").setDescription("Amount to transfer").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("admintransfer")
+    .setDescription("Admin only: transfer balance from one user to another")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(o =>
+      o.setName("from").setDescription("User to remove coins from").setRequired(true)
+    )
+    .addUserOption(o =>
+      o.setName("to").setDescription("User to receive coins").setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName("amount").setDescription("Amount to transfer").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("streak")
+    .setDescription("Check coinflip win streak")
+    .addUserOption(o =>
+      o.setName("user").setDescription("User to check").setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("streakboard")
+    .setDescription("Show coinflip win streak leaderboard"),
+
+  new SlashCommandBuilder()
+    .setName("duel")
+    .setDescription("Create a skill-based PvP duel")
+    .addIntegerOption(o =>
+      o.setName("bet").setDescription("Duel bet amount").setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -1848,12 +2002,17 @@ async function handleJoinCoinflip(interaction) {
       `Won coinflip vs <@${loserId}> | Game: ${gameId}`
     );
 
+    const winnerStreak = getCoinflipStreak(guildId, winnerId) + 1;
+    const loserOldStreak = getCoinflipStreak(guildId, loserId);
+    setCoinflipStreak(guildId, winnerId, winnerStreak);
+    setCoinflipStreak(guildId, loserId, 0);
+
     logTransaction(
       guildId,
       loserId,
       "COINFLIP_LOSS",
       0,
-      `Lost coinflip vs <@${winnerId}> | Game: ${gameId}`
+      `Lost coinflip vs <@${winnerId}> | Game: ${gameId} | Streak broken: ${loserOldStreak}`
     );
 
     db.prepare(
@@ -1869,6 +2028,9 @@ async function handleJoinCoinflip(interaction) {
       ephemeral: true
     });
   }
+
+  const winnerCurrentStreak = getCoinflipStreak(guildId, winnerId);
+  const streakComment = getStreakComment(winnerCurrentStreak);
 
   await logCasino(
     makeLogEmbed(
@@ -1899,6 +2061,174 @@ async function handleJoinCoinflip(interaction) {
 
 
 
+
+
+// -------- Duel Code -------
+function makeDuelId() { return `DL-${Date.now()}-${Math.floor(Math.random() * 999999)}`; }
+
+function duelButtons(duelId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`duel_join:${duelId}`).setLabel("Join Duel").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`duel_cancel:${duelId}`).setLabel("Cancel").setStyle(ButtonStyle.Danger)
+  );
+}
+
+function duelFightButtons(duelId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`duel_attack:${duelId}`).setLabel("Attack").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`duel_defend:${duelId}`).setLabel("Defend").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`duel_heavy:${duelId}`).setLabel("Heavy Attack").setStyle(ButtonStyle.Danger)
+  );
+}
+
+function duelOpenEmbed(duel) {
+  const expireUnix = Math.floor((duel.expires_at || Date.now() + DUEL_LOBBY_TIMEOUT) / 1000);
+  return new EmbedBuilder().setTitle("⚔️ PvP Duel Challenge").setColor(0xff3b3b).setDescription(
+    `**Creator:** <@${duel.creator_id}>\n` +
+    `**Bet:** ${duel.bet.toLocaleString()} Digital Silver\n` +
+    `**Prize Pool:** ${(duel.bet * 2).toLocaleString()} Digital Silver\n` +
+    `⏰ **Expires:** <t:${expireUnix}:R>\n\n` +
+    `Waiting for an opponent...\n\nCreator can cancel before someone joins.`
+  );
+}
+
+function duelBattleEmbed(duel, logText = "") {
+  const expireUnix = Math.floor((duel.expires_at || Date.now() + DUEL_TURN_TIMEOUT) / 1000);
+  return new EmbedBuilder().setTitle("⚔️ PvP Duel").setColor(0xff3b3b).setDescription(
+    `**Player 1:** <@${duel.creator_id}> ❤️ ${duel.creator_hp} HP\n` +
+    `**Player 2:** <@${duel.opponent_id}> ❤️ ${duel.opponent_hp} HP\n\n` +
+    `🎯 **Turn:** <@${duel.turn_user_id}>\n` +
+    `⏰ **Move Expires:** <t:${expireUnix}:R>\n` +
+    `💰 **Prize Pool:** ${(duel.bet * 2).toLocaleString()} Digital Silver\n\n` +
+    `${logText ? `**Last Action:**\n${logText}\n\n` : ""}` +
+    `Choose your move:\n⚔️ Attack = 20 damage\n🛡️ Defend = heal 10 HP\n💥 Heavy Attack = 40 damage, 50% miss chance`
+  );
+}
+
+function duelFinishedEmbed(duel, winnerId, loserId, logText = "") {
+  return new EmbedBuilder().setTitle("🏆 Duel Finished").setColor(0x00ff00).setDescription(
+    `🥇 **Winner:** <@${winnerId}>\n💀 **Loser:** <@${loserId}>\n` +
+    `💰 **Prize Won:** ${(duel.bet * 2).toLocaleString()} Digital Silver\n\n` +
+    `${logText ? `**Final Action:**\n${logText}` : ""}`
+  );
+}
+
+async function handleDuelJoin(interaction) {
+  const guildId = interaction.guild.id;
+  const duelId = interaction.customId.replace("duel_join:", "");
+  const duel = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+  if (!duel || duel.status !== "open") return interaction.reply({ content: "❌ This duel is no longer open.", ephemeral: true });
+  if (interaction.user.id === duel.creator_id) return interaction.reply({ content: "❌ You cannot join your own duel.", ephemeral: true });
+  if (getBal(guildId, interaction.user.id) < duel.bet) return interaction.reply({ content: "❌ You do not have enough Digital Silver to join this duel.", ephemeral: true });
+
+  const joinTx = db.transaction(() => {
+    const fresh = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+    if (!fresh || fresh.status !== "open") throw new Error("Duel no longer open.");
+    changeBalance(guildId, interaction.user.id, -duel.bet, "DUEL_JOIN_LOCK", `Joined duel | Duel: ${duelId}`);
+    db.prepare(`UPDATE duels SET opponent_id = ?, status = 'active', turn_user_id = ?, last_action_at = ?, expires_at = ?, updated_at = ? WHERE duel_id = ? AND status = 'open'`)
+      .run(interaction.user.id, duel.creator_id, Date.now(), Date.now() + DUEL_TURN_TIMEOUT, Date.now(), duelId);
+  });
+  try { joinTx(); } catch { return interaction.reply({ content: "❌ This duel is no longer open.", ephemeral: true }); }
+  const updated = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+  await logCasino(makeLogEmbed("⚔️ Duel Started", `👤 **Player 1:** <@${updated.creator_id}>\n👤 **Player 2:** <@${updated.opponent_id}>\n💰 **Bet:** ${updated.bet.toLocaleString()} Digital Silver\n🎮 **Duel:** \`${duelId}\``));
+  return interaction.update({ embeds: [duelBattleEmbed(updated, "Duel started!")], components: [duelFightButtons(duelId)] });
+}
+
+async function handleDuelCancel(interaction) {
+  const guildId = interaction.guild.id;
+  const duelId = interaction.customId.replace("duel_cancel:", "");
+  const duel = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+  if (!duel || duel.status !== "open") return interaction.reply({ content: "❌ This duel cannot be cancelled.", ephemeral: true });
+  const isAdmin = interaction.memberPermissions.has(PermissionFlagsBits.Administrator);
+  if (interaction.user.id !== duel.creator_id && !isAdmin) return interaction.reply({ content: "❌ Only the creator or an admin can cancel this duel.", ephemeral: true });
+  const cancelTx = db.transaction(() => {
+    const fresh = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+    if (!fresh || fresh.status !== "open") throw new Error("Duel already handled.");
+    db.prepare("UPDATE duels SET status = 'cancelled', updated_at = ? WHERE duel_id = ? AND status = 'open'").run(Date.now(), duelId);
+    changeBalance(guildId, duel.creator_id, duel.bet, "DUEL_CANCEL_REFUND", `Duel cancelled refund | Duel: ${duelId}`);
+  });
+  try { cancelTx(); } catch { return interaction.reply({ content: "❌ This duel is already handled.", ephemeral: true }); }
+  const embed = makeLogEmbed("🚫 Duel Cancelled", `👤 **Creator:** <@${duel.creator_id}>\n💰 **Refunded:** ${duel.bet.toLocaleString()} Digital Silver\n🎮 **Duel:** \`${duelId}\``, 0x808080);
+  await logCasino(embed);
+  return interaction.update({ embeds: [embed], components: [] });
+}
+
+async function handleDuelMove(interaction, move) {
+  const guildId = interaction.guild.id;
+  const duelId = interaction.customId.replace(`duel_${move}:`, "");
+  const duel = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+  if (!duel || duel.status !== "active") return interaction.reply({ content: "❌ This duel is not active.", ephemeral: true });
+  if (interaction.user.id !== duel.turn_user_id) return interaction.reply({ content: "❌ It is not your turn.", ephemeral: true });
+
+  const isCreatorTurn = interaction.user.id === duel.creator_id;
+  let creatorHp = duel.creator_hp, opponentHp = duel.opponent_hp, logText = "";
+  if (move === "attack") { const damage = 20; if (isCreatorTurn) opponentHp -= damage; else creatorHp -= damage; logText = `<@${interaction.user.id}> used **Attack** and dealt **${damage} damage**.`; }
+  if (move === "defend") { const heal = 10; if (isCreatorTurn) creatorHp = Math.min(DUEL_START_HP, creatorHp + heal); else opponentHp = Math.min(DUEL_START_HP, opponentHp + heal); logText = `<@${interaction.user.id}> used **Defend** and healed **${heal} HP**.`; }
+  if (move === "heavy") { const hit = Math.random() < 0.5; if (hit) { const damage = 40; if (isCreatorTurn) opponentHp -= damage; else creatorHp -= damage; logText = `<@${interaction.user.id}> used **Heavy Attack** and dealt **${damage} damage**.`; } else logText = `<@${interaction.user.id}> used **Heavy Attack** but missed.`; }
+  creatorHp = Math.max(0, creatorHp); opponentHp = Math.max(0, opponentHp);
+  let winnerId = null, loserId = null;
+  if (creatorHp <= 0) { winnerId = duel.opponent_id; loserId = duel.creator_id; }
+  else if (opponentHp <= 0) { winnerId = duel.creator_id; loserId = duel.opponent_id; }
+
+  if (winnerId) {
+    const pot = duel.bet * 2;
+    const finishTx = db.transaction(() => {
+      db.prepare("UPDATE duels SET creator_hp = ?, opponent_hp = ?, status = 'finished', winner_id = ?, updated_at = ? WHERE duel_id = ? AND status = 'active'").run(creatorHp, opponentHp, winnerId, Date.now(), duelId);
+      changeBalance(guildId, winnerId, pot, "DUEL_WIN", `Won duel vs <@${loserId}> | Duel: ${duelId}`);
+      logTransaction(guildId, loserId, "DUEL_LOSS", 0, `Lost duel vs <@${winnerId}> | Duel: ${duelId}`);
+    });
+    finishTx();
+    const embed = duelFinishedEmbed({ ...duel, creator_hp: creatorHp, opponent_hp: opponentHp }, winnerId, loserId, logText);
+    await logCasino(embed);
+    return interaction.update({ embeds: [embed], components: [] });
+  }
+  const nextTurnUserId = isCreatorTurn ? duel.opponent_id : duel.creator_id;
+  db.prepare("UPDATE duels SET creator_hp = ?, opponent_hp = ?, turn_user_id = ?, last_action_at = ?, expires_at = ?, updated_at = ? WHERE duel_id = ? AND status = 'active'")
+    .run(creatorHp, opponentHp, nextTurnUserId, Date.now(), Date.now() + DUEL_TURN_TIMEOUT, Date.now(), duelId);
+  const updated = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+  return interaction.update({ embeds: [duelBattleEmbed(updated, logText)], components: [duelFightButtons(duelId)] });
+}
+
+async function checkExpiredDuels() {
+  const now = Date.now();
+  const expiredOpenDuels = db.prepare("SELECT * FROM duels WHERE status = 'open' AND expires_at IS NOT NULL AND expires_at <= ?").all(now);
+  for (const duel of expiredOpenDuels) {
+    try {
+      const refundTx = db.transaction(() => {
+        const fresh = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duel.duel_id);
+        if (!fresh || fresh.status !== "open") return;
+        db.prepare("UPDATE duels SET status = 'expired', updated_at = ? WHERE duel_id = ? AND status = 'open'").run(Date.now(), duel.duel_id);
+        changeBalance(duel.guild_id, duel.creator_id, duel.bet, "DUEL_LOBBY_TIMEOUT_REFUND", `Duel expired because no one joined | Duel: ${duel.duel_id}`);
+      });
+      refundTx();
+      const embed = makeLogEmbed("⏰ Duel Expired", `👤 **Creator:** <@${duel.creator_id}>\n💰 **Refunded:** ${duel.bet.toLocaleString()} Digital Silver\n🎮 **Duel:** \`${duel.duel_id}\`\n\nNo opponent joined within 5 minutes.`, 0x808080);
+      await logCasino(embed);
+      if (duel.channel_id && duel.message_id) { try { const channel = await client.channels.fetch(duel.channel_id); const msg = await channel.messages.fetch(duel.message_id); await msg.edit({ embeds: [embed], components: [] }); } catch {} }
+    } catch (err) { console.error("Expired open duel error:", err); }
+  }
+
+  const expiredActiveDuels = db.prepare("SELECT * FROM duels WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?").all(now);
+  for (const duel of expiredActiveDuels) {
+    try {
+      const loserId = duel.turn_user_id;
+      const winnerId = loserId === duel.creator_id ? duel.opponent_id : duel.creator_id;
+      const pot = duel.bet * 2;
+      if (!winnerId || !loserId) continue;
+      const forfeitTx = db.transaction(() => {
+        const fresh = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duel.duel_id);
+        if (!fresh || fresh.status !== "active") return;
+        db.prepare("UPDATE duels SET status = 'finished', winner_id = ?, updated_at = ? WHERE duel_id = ? AND status = 'active'").run(winnerId, Date.now(), duel.duel_id);
+        changeBalance(duel.guild_id, winnerId, pot, "DUEL_TIMEOUT_WIN", `Won duel by opponent timeout | Duel: ${duel.duel_id}`);
+        logTransaction(duel.guild_id, loserId, "DUEL_TIMEOUT_LOSS", 0, `Lost duel by not responding in time | Duel: ${duel.duel_id}`);
+      });
+      forfeitTx();
+      const embed = makeLogEmbed("⏰ Duel Forfeit", `🥇 **Winner:** <@${winnerId}>\n💀 **Loser:** <@${loserId}>\n💰 **Prize Won:** ${pot.toLocaleString()} Digital Silver\n🎮 **Duel:** \`${duel.duel_id}\`\n\n<@${loserId}> did not respond within 5 minutes.`, 0xff0000);
+      await logCasino(embed);
+      if (duel.channel_id && duel.message_id) { try { const channel = await client.channels.fetch(duel.channel_id); const msg = await channel.messages.fetch(duel.message_id); await msg.edit({ embeds: [embed], components: [] }); } catch {} }
+    } catch (err) { console.error("Expired active duel error:", err); }
+  }
+}
+// -------- Duel Code End -------
 
 // -------- Blackjack Code -------
 function makeBlackjackId() {
@@ -2723,6 +3053,26 @@ client.on("interactionCreate", async interaction => {
         return handleRaidCancelButton(interaction);
       }
 
+      if (interaction.customId.startsWith("duel_join:")) {
+        return handleDuelJoin(interaction);
+      }
+
+      if (interaction.customId.startsWith("duel_cancel:")) {
+        return handleDuelCancel(interaction);
+      }
+
+      if (interaction.customId.startsWith("duel_attack:")) {
+        return handleDuelMove(interaction, "attack");
+      }
+
+      if (interaction.customId.startsWith("duel_defend:")) {
+        return handleDuelMove(interaction, "defend");
+      }
+
+      if (interaction.customId.startsWith("duel_heavy:")) {
+        return handleDuelMove(interaction, "heavy");
+      }
+
       if (interaction.customId.startsWith("raid_attack:")) {
         return handleRaidAction(interaction, "attack");
       }
@@ -3077,6 +3427,72 @@ client.on("interactionCreate", async interaction => {
         `✅ Removed **${removeAmount.toLocaleString()} coins** from ${user}.\n` +
         `💰 New balance: **${getBal(guildId, user.id).toLocaleString()} coins**`
       );
+    }
+
+    if (command === "transfer") {
+      const toUser = interaction.options.getUser("user");
+      const amount = interaction.options.getInteger("amount");
+      const fromUser = interaction.user;
+      if (toUser.bot) return interaction.reply({ content: "❌ You cannot transfer Digital Silver to a bot.", ephemeral: true });
+      if (amount < MIN_TRANSFER) return interaction.reply({ content: `❌ Minimum transfer is **${MIN_TRANSFER.toLocaleString()} coin**.`, ephemeral: true });
+      try {
+        transferBalance(guildId, fromUser.id, toUser.id, amount, "TRANSFER_SENT", "TRANSFER_RECEIVED", `Transfer ${fromUser.tag} -> ${toUser.tag}`);
+      } catch (err) {
+        return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+      }
+      const embed = makeLogEmbed("💸 User Transfer", `👤 **From:** ${fromUser}\n👤 **To:** ${toUser}\n💰 **Amount:** ${amount.toLocaleString()} Digital Silver\n💳 **Sender Balance:** ${getBal(guildId, fromUser.id).toLocaleString()} Digital Silver`, 0x00ff00);
+      await logToChannel(client, embed);
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    if (command === "admintransfer") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      const fromUser = interaction.options.getUser("from");
+      const toUser = interaction.options.getUser("to");
+      const amount = interaction.options.getInteger("amount");
+      if (amount <= 0) return interaction.reply({ content: "❌ Amount must be more than 0.", ephemeral: true });
+      try {
+        transferBalance(guildId, fromUser.id, toUser.id, amount, "ADMIN_TRANSFER_OUT", "ADMIN_TRANSFER_IN", `Admin transfer by ${interaction.user.tag}: ${fromUser.tag} -> ${toUser.tag}`);
+      } catch (err) {
+        return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+      }
+      const embed = makeLogEmbed("👑 Admin Transfer", `👤 **From:** ${fromUser}\n👤 **To:** ${toUser}\n💰 **Amount:** ${amount.toLocaleString()} Digital Silver\n🛡️ **Admin:** ${interaction.user}\n💳 **From New Balance:** ${getBal(guildId, fromUser.id).toLocaleString()} Digital Silver\n💳 **To New Balance:** ${getBal(guildId, toUser.id).toLocaleString()} Digital Silver`, 0xffcc00);
+      await logToChannel(client, embed);
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (command === "streak") {
+      const user = interaction.options.getUser("user") || interaction.user;
+      const streak = getCoinflipStreak(guildId, user.id);
+      return interaction.reply(`🔥 ${user} coinflip win streak: **${streak.toLocaleString()}**\n💬 **${getStreakComment(streak)}**`);
+    }
+
+    if (command === "streakboard") {
+      const data = makeStreakboardPage(guildId, 0);
+      return interaction.reply({ embeds: [data.embed], components: [pageButtons("streakboard", data.page, data.maxPage, interaction.user.id)] });
+    }
+
+    if (command === "duel") {
+      const creator = interaction.user;
+      const bet = interaction.options.getInteger("bet");
+      if (bet < MIN_DUEL_BET) return interaction.reply({ content: `❌ Minimum duel bet is **${MIN_DUEL_BET.toLocaleString()} Digital Silver**.`, ephemeral: true });
+      if (bet > MAX_DUEL_BET) return interaction.reply({ content: `❌ Maximum duel bet is **${MAX_DUEL_BET.toLocaleString()} Digital Silver**.`, ephemeral: true });
+      const openDuel = db.prepare("SELECT * FROM duels WHERE guild_id = ? AND creator_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1").get(guildId, creator.id);
+      if (openDuel) return interaction.reply({ content: "❌ You already have an open duel. Start it or cancel it first.", ephemeral: true });
+      if (getBal(guildId, creator.id) < bet) return interaction.reply({ content: "❌ You do not have enough Digital Silver.", ephemeral: true });
+      const duelId = makeDuelId();
+      const now = Date.now();
+      const createDuelTx = db.transaction(() => {
+        changeBalance(guildId, creator.id, -bet, "DUEL_CREATE_LOCK", `Created duel | Duel: ${duelId}`);
+        db.prepare(`INSERT INTO duels (duel_id, guild_id, channel_id, creator_id, bet, creator_hp, opponent_hp, status, created_at, last_action_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`)
+          .run(duelId, guildId, interaction.channel.id, creator.id, bet, DUEL_START_HP, DUEL_START_HP, now, now, now + DUEL_LOBBY_TIMEOUT);
+      });
+      createDuelTx();
+      const duel = db.prepare("SELECT * FROM duels WHERE duel_id = ?").get(duelId);
+      const msg = await interaction.reply({ embeds: [duelOpenEmbed(duel)], components: [duelButtons(duelId)], fetchReply: true });
+      db.prepare("UPDATE duels SET message_id = ? WHERE duel_id = ?").run(msg.id, duelId);
+      await logCasino(makeLogEmbed("⚔️ Duel Created", `👤 **Creator:** ${creator}\n💰 **Bet:** ${bet.toLocaleString()} Digital Silver\n🎮 **Duel:** \`${duelId}\``));
+      return;
     }
 
     if (command === "coinflipadmin") {
@@ -3543,6 +3959,10 @@ client.on("interactionCreate", async interaction => {
         "SELECT COUNT(*) AS count FROM raid_bosses WHERE guild_id = ? AND status IN ('open', 'active')"
       ).get(guildId);
 
+      const activeDuels = db.prepare(
+        "SELECT COUNT(*) AS count FROM duels WHERE guild_id = ? AND status IN ('open', 'active')"
+      ).get(guildId);
+
       const totalCoins = db.prepare(
         "SELECT COALESCE(SUM(balance), 0) AS total FROM users WHERE guild_id = ?"
       ).get(guildId);
@@ -3661,6 +4081,7 @@ async function logCasino(embed, components = []) {
 
 
 setInterval(checkExpiredBlackjackGames, 60_000);
+setInterval(checkExpiredDuels, 60_000);
 setInterval(checkRaidBosses, 60_000);
 
 client.login(process.env.TOKEN);
