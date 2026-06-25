@@ -657,7 +657,22 @@ const commands = [
       .setDescription("User whose pending withdrawal should be cleared")
       .setRequired(true)
   ),
-
+new SlashCommandBuilder()
+  .setName("discount")
+  .setDescription("Calculate discounted price")
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+  .addIntegerOption(option =>
+    option
+      .setName("amount")
+      .setDescription("Original amount")
+      .setRequired(true)
+  )
+  .addNumberOption(option =>
+    option
+      .setName("discount")
+      .setDescription("Discount percentage")
+      .setRequired(true)
+  ),
 
 
   new SlashCommandBuilder()
@@ -872,6 +887,8 @@ async function registerCommands() {
     console.error("Command register error:", err);
   }
 }
+
+
 
 registerCommands();
 
@@ -3167,6 +3184,7 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId.startsWith("raid_heal:")) {
         return handleRaidAction(interaction, "heal");
       }
+      
 
 
 
@@ -3606,6 +3624,47 @@ client.on("interactionCreate", async interaction => {
           : "🛑 Coinflip has been **disabled**."
       );
     }
+    
+if (command === "discount") {
+  const amount = interaction.options.getInteger("amount");
+  const discount = interaction.options.getNumber("discount");
+
+  const discountAmount = Math.floor(amount * (discount / 100));
+  const finalAmount = amount - discountAmount;
+
+  const embed = new EmbedBuilder()
+    .setTitle("🏷️ Discount Calculator")
+    .setColor(0x00ff99)
+    .addFields(
+      {
+        name: "💰 Original Price",
+        value: amount.toLocaleString(),
+        inline: true
+      },
+      {
+        name: "📉 Discount",
+        value: `${discount}%`,
+        inline: true
+      },
+      {
+        name: "💸 Discount Amount",
+        value: discountAmount.toLocaleString(),
+        inline: true
+      },
+      {
+        name: "✅ Final Price",
+        value: finalAmount.toLocaleString(),
+        inline: false
+      }
+    )
+    .setTimestamp();
+
+  return interaction.reply({
+    embeds: [embed],
+    ephemeral: true
+  });
+}
+
 
     if (command === "blackjackadmin") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
