@@ -49,32 +49,6 @@ const DUEL_TURN_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 
 
-
-
-const { REST, Routes } = require('discord.js');
-const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-(async () => {
-  try {
-    await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), // guild-specific = instant
-      { body: commands },
-    );
-    console.log('Successfully reloaded commands.');
-  } catch (error) {
-    console.error(error);
-  }
-})();
-
-
-
-
-
-
-
-
-
-
 db.pragma("journal_mode = WAL");
 
 
