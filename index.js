@@ -20,7 +20,7 @@ const dbPath = process.env.DB_PATH || "economy.db";
 console.log("Using database:", dbPath);
 
 const db = new Database(dbPath);
-
+// 
 const BOT_VERSION = "3.5.2";
 const MAX_BET = 1_000_000;
 const MIN_BET = 100_000;
