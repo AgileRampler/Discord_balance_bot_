@@ -48,6 +48,9 @@ const DUEL_TURN_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 db.pragma("journal_mode = WAL");
 
+
+
+
 db.prepare(`
 CREATE TABLE IF NOT EXISTS users (
   guild_id TEXT NOT NULL,
