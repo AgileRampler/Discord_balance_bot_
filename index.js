@@ -47,12 +47,18 @@ const DUEL_LOBBY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const DUEL_TURN_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 
+try {
+  const data = await rest.put(
+    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+    { body: commands },
+  );
+  console.log(`✅ Successfully registered ${data.length} guild commands.`);
+} catch (error) {
+  console.error('❌ Failed to register commands:', error);
+}
 
 
 db.pragma("journal_mode = WAL");
-
-
-
 
 db.prepare(`
 CREATE TABLE IF NOT EXISTS users (
