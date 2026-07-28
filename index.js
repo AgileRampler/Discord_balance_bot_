@@ -45,7 +45,7 @@ const DUEL_LOBBY_TIMEOUT = 5 * 60 * 1000;     // 5 minutes
 const DUEL_TURN_TIMEOUT = 5 * 60 * 1000;      // 5 minutes
 
 // ==========================================
-// NUMBER FORMATTING HELPER
+// NUMBER FORMATTING HELPER (ENFORCES 100,000 FORMAT)
 // ==========================================
 function formatNum(num) {
   return Number(num || 0).toLocaleString("en-US");
@@ -447,17 +447,23 @@ function pageButtons(type, page, maxPage, userId, targetId = "none") {
 }
 
 // ==========================================
-// COINFLIP NOTIFICATION (1 MINUTE AUTO-DELETE)
+// SEPARATE AUTO-DELETING COINFLIP NOTIFICATION (1 MINUTE)
 // ==========================================
 async function sendSeparateCoinflipNotification(client, guildId, creatorId, amount, choice) {
   const generalChannelId = process.env.RAID_GENERAL_CHANNEL_ID;
   const casinoChannelId = process.env.CASINO_CHANNEL_ID;
 
-  if (!generalChannelId) return;
+  if (!generalChannelId) {
+    console.warn("⚠️ Coinflip Notification Skipped: RAID_GENERAL_CHANNEL_ID missing in .env");
+    return;
+  }
 
   try {
     const generalChannel = await client.channels.fetch(generalChannelId).catch(() => null);
-    if (!generalChannel || !generalChannel.isTextBased()) return;
+    if (!generalChannel || !generalChannel.isTextBased()) {
+      console.warn(`⚠️ Coinflip Notification Failed: General channel (${generalChannelId}) invalid or not text-based.`);
+      return;
+    }
 
     const embed = new EmbedBuilder()
       .setTitle("🎰 Live Casino Activity")
@@ -489,7 +495,7 @@ async function sendSeparateCoinflipNotification(client, guildId, creatorId, amou
     }, 60_000);
 
   } catch (err) {
-    console.error("❌ Error sending coinflip notification:", err);
+    console.error("❌ Error sending separate coinflip notification:", err);
   }
 }
 
@@ -2518,7 +2524,7 @@ client.on("interactionCreate", async interaction => {
       game.message_id = msg.id;
       await game.save();
 
-      // Send separate notification that auto-deletes in 1 minute
+      // 📢 Send SEPARATE notification that auto-deletes in 1 minute
       await sendSeparateCoinflipNotification(client, guildId, creator.id, bet, choice);
 
       return;
