@@ -11,7 +11,8 @@ const {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
-  ActivityType
+  ActivityType,
+  MessageFlags
 } = require("discord.js");
 
 const mongoose = require("mongoose");
@@ -1317,7 +1318,8 @@ async function checkRaidBosses(client) {
 // ==========================================
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once("ready", async () => {
+// RESOLVED DEPRECATION: Using clientReady event name for v14/v15
+client.once("clientReady", async () => {
   console.log(`✅ Logged in as ${client.user.tag} | Version ${BOT_VERSION}`);
 
   client.user.setPresence({
@@ -1342,11 +1344,11 @@ async function handleWithdrawApprove(interaction) {
   const withdrawId = interaction.customId.replace("withdraw_approve:", "");
 
   if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
-    return interaction.reply({ content: "❌ Only admins can approve withdrawals.", ephemeral: true });
+    return interaction.reply({ content: "❌ Only admins can approve withdrawals.", flags: MessageFlags.Ephemeral });
   }
 
   const request = await Withdrawal.findOne({ withdraw_id: withdrawId, status: "pending" });
-  if (!request) return interaction.reply({ content: "❌ This withdrawal is no longer pending.", ephemeral: true });
+  if (!request) return interaction.reply({ content: "❌ This withdrawal is no longer pending.", flags: MessageFlags.Ephemeral });
 
   request.status = "approved";
   request.admin_id = interaction.user.id;
@@ -1383,11 +1385,11 @@ async function handleWithdrawDeny(interaction) {
   const withdrawId = interaction.customId.replace("withdraw_deny:", "");
 
   if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
-    return interaction.reply({ content: "❌ Only admins can deny withdrawals.", ephemeral: true });
+    return interaction.reply({ content: "❌ Only admins can deny withdrawals.", flags: MessageFlags.Ephemeral });
   }
 
   const request = await Withdrawal.findOne({ withdraw_id: withdrawId, status: "pending" });
-  if (!request) return interaction.reply({ content: "❌ This withdrawal is no longer pending.", ephemeral: true });
+  if (!request) return interaction.reply({ content: "❌ This withdrawal is no longer pending.", flags: MessageFlags.Ephemeral });
 
   request.status = "denied";
   request.admin_id = interaction.user.id;
@@ -1419,8 +1421,8 @@ async function handleWithdrawCancel(interaction) {
   const withdrawId = interaction.customId.replace("withdraw_cancel:", "");
 
   const request = await Withdrawal.findOne({ withdraw_id: withdrawId, status: "pending" });
-  if (!request) return interaction.reply({ content: "❌ This withdrawal is no longer pending.", ephemeral: true });
-  if (interaction.user.id !== request.user_id) return interaction.reply({ content: "❌ Only the withdrawal requester can cancel this request.", ephemeral: true });
+  if (!request) return interaction.reply({ content: "❌ This withdrawal is no longer pending.", flags: MessageFlags.Ephemeral });
+  if (interaction.user.id !== request.user_id) return interaction.reply({ content: "❌ Only the withdrawal requester can cancel this request.", flags: MessageFlags.Ephemeral });
 
   request.status = "cancelled";
   request.updated_at = Date.now();
@@ -1449,8 +1451,8 @@ async function handleCancelCoinflipButton(interaction) {
   const gameId = interaction.customId.replace("cancel_coinflip:", "");
 
   const game = await Coinflip.findOne({ game_id: gameId, status: "open" });
-  if (!game) return interaction.reply({ content: "❌ This coinflip is no longer active.", ephemeral: true });
-  if (interaction.user.id !== game.creator_id) return interaction.reply({ content: "❌ Only the coinflip creator can cancel this game.", ephemeral: true });
+  if (!game) return interaction.reply({ content: "❌ This coinflip is no longer active.", flags: MessageFlags.Ephemeral });
+  if (interaction.user.id !== game.creator_id) return interaction.reply({ content: "❌ Only the coinflip creator can cancel this game.", flags: MessageFlags.Ephemeral });
 
   game.status = "cancelled";
   await game.save();
@@ -1478,13 +1480,13 @@ async function handleJoinCoinflip(interaction) {
   const opponent = interaction.user;
 
   const game = await Coinflip.findOne({ game_id: gameId, status: "open" });
-  if (!game) return interaction.reply({ content: "❌ This coinflip is no longer active.", ephemeral: true });
-  if (!(await isCoinflipEnabled(guildId))) return interaction.reply({ content: "❌ Coinflip is currently disabled by admins.", ephemeral: true });
-  if (opponent.id === game.creator_id) return interaction.reply({ content: "❌ You cannot join your own coinflip.", ephemeral: true });
-  if (opponent.bot) return interaction.reply({ content: "❌ Bots cannot join.", ephemeral: true });
+  if (!game) return interaction.reply({ content: "❌ This coinflip is no longer active.", flags: MessageFlags.Ephemeral });
+  if (!(await isCoinflipEnabled(guildId))) return interaction.reply({ content: "❌ Coinflip is currently disabled by admins.", flags: MessageFlags.Ephemeral });
+  if (opponent.id === game.creator_id) return interaction.reply({ content: "❌ You cannot join your own coinflip.", flags: MessageFlags.Ephemeral });
+  if (opponent.bot) return interaction.reply({ content: "❌ Bots cannot join.", flags: MessageFlags.Ephemeral });
 
   const opponentBal = await getBal(guildId, opponent.id);
-  if (opponentBal < game.bet) return interaction.reply({ content: "❌ You do not have enough coins to join.", ephemeral: true });
+  if (opponentBal < game.bet) return interaction.reply({ content: "❌ You do not have enough coins to join.", flags: MessageFlags.Ephemeral });
 
   const result = Math.random() < 0.5 ? "heads" : "tails";
   const creatorWon = result === game.choice;
@@ -1529,11 +1531,11 @@ async function handleDuelJoin(interaction) {
   const duelId = interaction.customId.replace("duel_join:", "");
 
   const duel = await Duel.findOne({ duel_id: duelId, status: "open" });
-  if (!duel) return interaction.reply({ content: "❌ This duel is no longer open.", ephemeral: true });
-  if (interaction.user.id === duel.creator_id) return interaction.reply({ content: "❌ You cannot join your own duel.", ephemeral: true });
+  if (!duel) return interaction.reply({ content: "❌ This duel is no longer open.", flags: MessageFlags.Ephemeral });
+  if (interaction.user.id === duel.creator_id) return interaction.reply({ content: "❌ You cannot join your own duel.", flags: MessageFlags.Ephemeral });
 
   const bal = await getBal(guildId, interaction.user.id);
-  if (bal < duel.bet) return interaction.reply({ content: "❌ You do not have enough Digital Silver to join this duel.", ephemeral: true });
+  if (bal < duel.bet) return interaction.reply({ content: "❌ You do not have enough Digital Silver to join this duel.", flags: MessageFlags.Ephemeral });
 
   await changeBalance(guildId, interaction.user.id, -duel.bet, "DUEL_JOIN_LOCK", `Joined duel | Duel: ${duelId}`);
 
@@ -1554,11 +1556,11 @@ async function handleDuelCancel(interaction) {
   const duelId = interaction.customId.replace("duel_cancel:", "");
 
   const duel = await Duel.findOne({ duel_id: duelId, status: "open" });
-  if (!duel) return interaction.reply({ content: "❌ This duel cannot be cancelled.", ephemeral: true });
+  if (!duel) return interaction.reply({ content: "❌ This duel cannot be cancelled.", flags: MessageFlags.Ephemeral });
 
   const isAdmin = interaction.memberPermissions.has(PermissionFlagsBits.Administrator);
   if (interaction.user.id !== duel.creator_id && !isAdmin) {
-    return interaction.reply({ content: "❌ Only the creator or an admin can cancel this duel.", ephemeral: true });
+    return interaction.reply({ content: "❌ Only the creator or an admin can cancel this duel.", flags: MessageFlags.Ephemeral });
   }
 
   duel.status = "cancelled";
@@ -1577,8 +1579,8 @@ async function handleDuelMove(interaction, move) {
   const duelId = interaction.customId.replace(`duel_${move}:`, "");
 
   const duel = await Duel.findOne({ duel_id: duelId, status: "active" });
-  if (!duel) return interaction.reply({ content: "❌ This duel is not active.", ephemeral: true });
-  if (interaction.user.id !== duel.turn_user_id) return interaction.reply({ content: "❌ It is not your turn.", ephemeral: true });
+  if (!duel) return interaction.reply({ content: "❌ This duel is not active.", flags: MessageFlags.Ephemeral });
+  if (interaction.user.id !== duel.turn_user_id) return interaction.reply({ content: "❌ It is not your turn.", flags: MessageFlags.Ephemeral });
 
   const isCreatorTurn = interaction.user.id === duel.creator_id;
   let creatorHp = duel.creator_hp, opponentHp = duel.opponent_hp, logText = "";
@@ -1644,16 +1646,16 @@ async function handleRaidJoin(interaction) {
   const raidId = interaction.customId.replace("raid_join:", "");
   const raid = await RaidBoss.findOne({ raid_id: raidId, status: "open" });
 
-  if (!raid) return interaction.reply({ content: "❌ This raid is no longer open for joining.", ephemeral: true });
+  if (!raid) return interaction.reply({ content: "❌ This raid is no longer open for joining.", flags: MessageFlags.Ephemeral });
 
   const count = await RaidPlayer.countDocuments({ raid_id: raidId });
-  if (count >= RAID_MAX_PLAYERS) return interaction.reply({ content: "❌ Raid is full.", ephemeral: true });
+  if (count >= RAID_MAX_PLAYERS) return interaction.reply({ content: "❌ Raid is full.", flags: MessageFlags.Ephemeral });
 
   const existing = await RaidPlayer.findOne({ raid_id: raidId, user_id: interaction.user.id });
-  if (existing) return interaction.reply({ content: `✅ You already joined. Continue in <#${raid.raid_channel_id}>.`, ephemeral: true });
+  if (existing) return interaction.reply({ content: `✅ You already joined. Continue in <#${raid.raid_channel_id}>.`, flags: MessageFlags.Ephemeral });
 
   const bal = await getBal(guildId, interaction.user.id);
-  if (bal < raid.join_fee) return interaction.reply({ content: `❌ You need **${formatNum(raid.join_fee)} Digital Silver** to join this raid.`, ephemeral: true });
+  if (bal < raid.join_fee) return interaction.reply({ content: `❌ You need **${formatNum(raid.join_fee)} Digital Silver** to join this raid.`, flags: MessageFlags.Ephemeral });
 
   await changeBalance(guildId, interaction.user.id, -raid.join_fee, "RAID_JOIN_FEE", `Joined raid boss | Raid: ${raidId}`);
 
@@ -1684,7 +1686,7 @@ async function handleRaidJoin(interaction) {
 
   return interaction.reply({
     content: `✅ You joined the raid. **${formatNum(raid.join_fee)} Digital Silver** locked into the pool.\nContinue the fight here: <#${raid.raid_channel_id}>`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
@@ -1693,11 +1695,11 @@ async function handleRaidCancelButton(interaction) {
   const raidId = interaction.customId.replace("raid_cancel:", "");
 
   if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
-    return interaction.reply({ content: "❌ Only admins can cancel raids.", ephemeral: true });
+    return interaction.reply({ content: "❌ Only admins can cancel raids.", flags: MessageFlags.Ephemeral });
   }
 
   const raid = await RaidBoss.findOne({ raid_id: raidId, guild_id: guildId, status: { $in: ["open", "active"] } });
-  if (!raid) return interaction.reply({ content: "❌ This raid is already finished/cancelled.", ephemeral: true });
+  if (!raid) return interaction.reply({ content: "❌ This raid is already finished/cancelled.", flags: MessageFlags.Ephemeral });
 
   const players = await RaidPlayer.find({ raid_id: raidId });
 
@@ -1740,7 +1742,7 @@ async function handleRaidCancelButton(interaction) {
 
   return interaction.reply({
     content: `✅ Raid cancelled.\n👥 Refunded **${players.length}** players.\n💰 Total refunded: **${formatNum(players.length * raid.join_fee)} Digital Silver**`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
@@ -1749,14 +1751,14 @@ async function handleRaidAction(interaction, action) {
   const raidId = interaction.customId.replace(`raid_${action}:`, "");
   const raid = await RaidBoss.findOne({ raid_id: raidId, status: "active" });
 
-  if (!raid) return interaction.reply({ content: "❌ This raid is not active.", ephemeral: true });
+  if (!raid) return interaction.reply({ content: "❌ This raid is not active.", flags: MessageFlags.Ephemeral });
 
   const player = await RaidPlayer.findOne({ raid_id: raidId, user_id: interaction.user.id });
-  if (!player) return interaction.reply({ content: "❌ You must join the raid from the spawn message first.", ephemeral: true });
+  if (!player) return interaction.reply({ content: "❌ You must join the raid from the spawn message first.", flags: MessageFlags.Ephemeral });
 
   const now = Date.now();
   const waitMs = RAID_ACTION_COOLDOWN - (now - Number(player.last_action_at || 0));
-  if (waitMs > 0) return interaction.reply({ content: `⏳ You are on cooldown. Try again in **${Math.ceil(waitMs / 1000)}s**.`, ephemeral: true });
+  if (waitMs > 0) return interaction.reply({ content: `⏳ You are on cooldown. Try again in **${Math.ceil(waitMs / 1000)}s**.`, flags: MessageFlags.Ephemeral });
 
   let damage = 0, healing = 0, tanking = 0, logText = "";
 
@@ -1798,7 +1800,7 @@ async function handleRaidAction(interaction, action) {
       } catch {}
     }
 
-    return interaction.update({ embeds: [embed], components: [] }).catch(() => interaction.reply({ content: "🏆 Raid boss defeated!", ephemeral: true }));
+    return interaction.update({ embeds: [embed], components: [] }).catch(() => interaction.reply({ content: "🏆 Raid boss defeated!", flags: MessageFlags.Ephemeral }));
   }
 
   await updateRaidMessages(client, raidId, logText);
@@ -1807,20 +1809,20 @@ async function handleRaidAction(interaction, action) {
 
 async function handleBlackjackJoin(interaction) {
   const guildId = interaction.guild.id;
-  if (!(await isBlackjackEnabled(guildId))) return interaction.reply({ content: "❌ Blackjack is currently disabled by admins.", ephemeral: true });
+  if (!(await isBlackjackEnabled(guildId))) return interaction.reply({ content: "❌ Blackjack is currently disabled by admins.", flags: MessageFlags.Ephemeral });
 
   const gameId = interaction.customId.replace("bj_join:", "");
   const game = await BlackjackGame.findOne({ game_id: gameId, status: "open" });
-  if (!game) return interaction.reply({ content: "❌ This blackjack table is no longer open.", ephemeral: true });
+  if (!game) return interaction.reply({ content: "❌ This blackjack table is no longer open.", flags: MessageFlags.Ephemeral });
 
   const existing = await BlackjackPlayer.findOne({ game_id: gameId, user_id: interaction.user.id });
-  if (existing) return interaction.reply({ content: "❌ You already joined this table.", ephemeral: true });
+  if (existing) return interaction.reply({ content: "❌ You already joined this table.", flags: MessageFlags.Ephemeral });
 
   const count = await BlackjackPlayer.countDocuments({ game_id: gameId });
-  if (count >= MAX_BLACKJACK_PLAYERS) return interaction.reply({ content: "❌ Blackjack table is full.", ephemeral: true });
+  if (count >= MAX_BLACKJACK_PLAYERS) return interaction.reply({ content: "❌ Blackjack table is full.", flags: MessageFlags.Ephemeral });
 
   const bal = await getBal(guildId, interaction.user.id);
-  if (bal < game.buyin) return interaction.reply({ content: "❌ You do not have enough Digital Silver.", ephemeral: true });
+  if (bal < game.buyin) return interaction.reply({ content: "❌ You do not have enough Digital Silver.", flags: MessageFlags.Ephemeral });
 
   await changeBalance(guildId, interaction.user.id, -game.buyin, "BLACKJACK_BUYIN_LOCK", `Joined blackjack | Game: ${gameId}`);
 
@@ -1841,7 +1843,7 @@ async function handleBlackjackJoin(interaction) {
   await updateBlackjackMessage(client, gameId);
   await logCasino(client, makeLogEmbed("🃏 Blackjack Player Joined", `👤 **Player:** ${interaction.user}\n💰 **Buy-in:** ${formatNum(game.buyin)} Digital Silver\n🎮 **Game:** \`${gameId}\``));
 
-  return interaction.reply({ content: "✅ Joined blackjack table.", ephemeral: true });
+  return interaction.reply({ content: "✅ Joined blackjack table.", flags: MessageFlags.Ephemeral });
 }
 
 async function handleBlackjackLeave(interaction) {
@@ -1849,11 +1851,11 @@ async function handleBlackjackLeave(interaction) {
   const gameId = interaction.customId.replace("bj_leave:", "");
   const game = await BlackjackGame.findOne({ game_id: gameId, status: "open" });
 
-  if (!game) return interaction.reply({ content: "❌ You can only leave before the game starts.", ephemeral: true });
+  if (!game) return interaction.reply({ content: "❌ You can only leave before the game starts.", flags: MessageFlags.Ephemeral });
 
   const player = await BlackjackPlayer.findOne({ game_id: gameId, user_id: interaction.user.id });
-  if (!player) return interaction.reply({ content: "❌ You are not in this table.", ephemeral: true });
-  if (interaction.user.id === game.host_id) return interaction.reply({ content: "❌ Host cannot leave. Use Cancel.", ephemeral: true });
+  if (!player) return interaction.reply({ content: "❌ You are not in this table.", flags: MessageFlags.Ephemeral });
+  if (interaction.user.id === game.host_id) return interaction.reply({ content: "❌ Host cannot leave. Use Cancel.", flags: MessageFlags.Ephemeral });
 
   await BlackjackPlayer.deleteOne({ game_id: gameId, user_id: interaction.user.id });
   game.pot -= game.buyin;
@@ -1863,7 +1865,7 @@ async function handleBlackjackLeave(interaction) {
   await changeBalance(guildId, interaction.user.id, game.buyin, "BLACKJACK_LEAVE_REFUND", `Left blackjack refund | Game: ${gameId}`);
   await updateBlackjackMessage(client, gameId);
 
-  return interaction.reply({ content: `✅ Left blackjack table. Refunded **${formatNum(game.buyin)} Digital Silver**.`, ephemeral: true });
+  return interaction.reply({ content: `✅ Left blackjack table. Refunded **${formatNum(game.buyin)} Digital Silver**.`, flags: MessageFlags.Ephemeral });
 }
 
 async function handleBlackjackCancel(interaction) {
@@ -1871,11 +1873,11 @@ async function handleBlackjackCancel(interaction) {
   const gameId = interaction.customId.replace("bj_cancel:", "");
   const game = await BlackjackGame.findOne({ game_id: gameId, status: "open" });
 
-  if (!game) return interaction.reply({ content: "❌ This blackjack table cannot be cancelled now.", ephemeral: true });
+  if (!game) return interaction.reply({ content: "❌ This blackjack table cannot be cancelled now.", flags: MessageFlags.Ephemeral });
 
   const isAdmin = interaction.memberPermissions.has(PermissionFlagsBits.Administrator);
   if (interaction.user.id !== game.host_id && !isAdmin) {
-    return interaction.reply({ content: "❌ Only the host/admin can cancel this table.", ephemeral: true });
+    return interaction.reply({ content: "❌ Only the host/admin can cancel this table.", flags: MessageFlags.Ephemeral });
   }
 
   const players = await BlackjackPlayer.find({ game_id: gameId });
@@ -1897,15 +1899,15 @@ async function handleBlackjackStart(interaction) {
   const gameId = interaction.customId.replace("bj_start:", "");
   const game = await BlackjackGame.findOne({ game_id: gameId, status: "open" });
 
-  if (!game) return interaction.reply({ content: "❌ This blackjack table is not open.", ephemeral: true });
+  if (!game) return interaction.reply({ content: "❌ This blackjack table is not open.", flags: MessageFlags.Ephemeral });
 
   const isAdmin = interaction.memberPermissions.has(PermissionFlagsBits.Administrator);
   if (interaction.user.id !== game.host_id && !isAdmin) {
-    return interaction.reply({ content: "❌ Only the host/admin can start this game.", ephemeral: true });
+    return interaction.reply({ content: "❌ Only the host/admin can start this game.", flags: MessageFlags.Ephemeral });
   }
 
   const players = await BlackjackPlayer.find({ game_id: gameId }).sort({ joined_at: 1 });
-  if (players.length < 2) return interaction.reply({ content: "❌ Need at least 2 players to start blackjack.", ephemeral: true });
+  if (players.length < 2) return interaction.reply({ content: "❌ Need at least 2 players to start blackjack.", flags: MessageFlags.Ephemeral });
 
   const deck = bjCreateDeck();
   for (const player of players) {
@@ -1937,23 +1939,23 @@ async function handleBlackjackMove(interaction, move) {
   const gameId = interaction.customId.replace(`bj_${move}:`, "");
   const game = await BlackjackGame.findOne({ game_id: gameId, status: "active" });
 
-  if (!game) return interaction.reply({ content: "❌ This blackjack game is not active.", ephemeral: true });
+  if (!game) return interaction.reply({ content: "❌ This blackjack game is not active.", flags: MessageFlags.Ephemeral });
 
   const players = await BlackjackPlayer.find({ game_id: gameId }).sort({ joined_at: 1 });
   const current = players[game.current_turn_index];
 
   if (!current || current.user_id !== interaction.user.id) {
-    return interaction.reply({ content: "❌ It is not your turn.", ephemeral: true });
+    return interaction.reply({ content: "❌ It is not your turn.", flags: MessageFlags.Ephemeral });
   }
 
   let hands = current.hands;
   let hand = hands[current.active_hand_index];
   let logText = "";
 
-  if (!hand || hand.done) return interaction.reply({ content: "❌ This hand is already done.", ephemeral: true });
+  if (!hand || hand.done) return interaction.reply({ content: "❌ This hand is already done.", flags: MessageFlags.Ephemeral });
 
   if (move === "split") {
-    if (!bjCanSplit(current)) return interaction.reply({ content: "❌ You can only split when your first 2 cards have the same value.", ephemeral: true });
+    if (!bjCanSplit(current)) return interaction.reply({ content: "❌ You can only split when your first 2 cards have the same value.", flags: MessageFlags.Ephemeral });
 
     const first = hand.cards[0];
     const second = hand.cards[1];
@@ -2014,7 +2016,7 @@ async function handleBlackjackMove(interaction, move) {
 
   const updatedPlayer = await BlackjackPlayer.findOne({ game_id: gameId, user_id: interaction.user.id });
   if (updatedPlayer) {
-    await interaction.followUp({ content: `🃏 **Your Updated Hand**\n\n${bjPrivateHandText(updatedPlayer)}`, ephemeral: true }).catch(() => {});
+    await interaction.followUp({ content: `🃏 **Your Updated Hand**\n\n${bjPrivateHandText(updatedPlayer)}`, flags: MessageFlags.Ephemeral }).catch(() => {});
   }
 }
 
@@ -2022,17 +2024,17 @@ async function handleBlackjackView(interaction) {
   const gameId = interaction.customId.replace("bj_view:", "");
   const game = await BlackjackGame.findOne({ game_id: gameId, status: "active" });
 
-  if (!game) return interaction.reply({ content: "❌ This blackjack game is not active.", ephemeral: true });
+  if (!game) return interaction.reply({ content: "❌ This blackjack game is not active.", flags: MessageFlags.Ephemeral });
 
   const player = await BlackjackPlayer.findOne({ game_id: gameId, user_id: interaction.user.id });
-  if (!player) return interaction.reply({ content: "❌ You are not in this blackjack game.", ephemeral: true });
+  if (!player) return interaction.reply({ content: "❌ You are not in this blackjack game.", flags: MessageFlags.Ephemeral });
 
   const players = await BlackjackPlayer.find({ game_id: gameId }).sort({ joined_at: 1 });
   const current = players[game.current_turn_index];
 
   return interaction.reply({
     content: `🃏 **Your Blackjack Hand**\n\n${bjPrivateHandText(player)}\n\n🎯 Current turn: ${current ? `<@${current.user_id}>` : "Resolving..."}`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
@@ -2048,7 +2050,7 @@ client.on("interactionCreate", async interaction => {
         const type = parts[1];
         const direction = parts[2];
 
-        if (interaction.user.id !== ownerId) return interaction.reply({ content: "❌ Only the user who opened this page can use these buttons.", ephemeral: true });
+        if (interaction.user.id !== ownerId) return interaction.reply({ content: "❌ Only the user who opened this page can use these buttons.", flags: MessageFlags.Ephemeral });
 
         const oldPage = parseInt(pageRaw, 10) || 0;
         const newPage = direction === "next" ? oldPage + 1 : oldPage - 1;
@@ -2059,7 +2061,7 @@ client.on("interactionCreate", async interaction => {
         }
         if (type === "history") {
           const user = await client.users.fetch(targetId).catch(() => null);
-          if (!user) return interaction.reply({ content: "❌ Could not fetch that user.", ephemeral: true });
+          if (!user) return interaction.reply({ content: "❌ Could not fetch that user.", flags: MessageFlags.Ephemeral });
           const data = await makeHistoryPage(interaction.guild.id, user, newPage);
           return interaction.update({ embeds: [data.embed], components: [pageButtons("history", data.page, data.maxPage, ownerId, targetId)] });
         }
@@ -2114,7 +2116,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "economy") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const stats = await getEconomyStats(guildId);
 
@@ -2166,15 +2168,15 @@ client.on("interactionCreate", async interaction => {
       const balance = await getBal(guildId, user.id);
 
       const parsed = parseAmountInput(input, balance);
-      if (parsed.error) return interaction.reply({ content: `❌ ${parsed.error}`, ephemeral: true });
+      if (parsed.error) return interaction.reply({ content: `❌ ${parsed.error}`, flags: MessageFlags.Ephemeral });
 
       const amount = parsed.amount;
-      if (amount <= 0) return interaction.reply({ content: "❌ Withdrawal amount must be more than 0.", ephemeral: true });
-      if (amount < MIN_WITHDRAW) return interaction.reply({ content: `❌ Minimum withdrawal is **${formatNum(MIN_WITHDRAW)} coins**.`, ephemeral: true });
-      if (amount > balance) return interaction.reply({ content: "❌ You do not have enough balance for this withdrawal.", ephemeral: true });
+      if (amount <= 0) return interaction.reply({ content: "❌ Withdrawal amount must be more than 0.", flags: MessageFlags.Ephemeral });
+      if (amount < MIN_WITHDRAW) return interaction.reply({ content: `❌ Minimum withdrawal is **${formatNum(MIN_WITHDRAW)} coins**.`, flags: MessageFlags.Ephemeral });
+      if (amount > balance) return interaction.reply({ content: "❌ You do not have enough balance for this withdrawal.", flags: MessageFlags.Ephemeral });
 
       const pending = await Withdrawal.findOne({ guild_id: guildId, user_id: user.id, status: "pending" });
-      if (pending) return interaction.reply({ content: "❌ You already have a pending withdrawal. Wait for admin approval, rejection, or cancel it first.", ephemeral: true });
+      if (pending) return interaction.reply({ content: "❌ You already have a pending withdrawal. Wait for admin approval, rejection, or cancel it first.", flags: MessageFlags.Ephemeral });
 
       const withdrawId = makeWithdrawId();
       const balanceBefore = balance;
@@ -2215,16 +2217,16 @@ client.on("interactionCreate", async interaction => {
       await request.save();
 
       await logToChannel(client, makeLogEmbed("💸 Withdrawal Request Created", `👤 **User:** ${user}\n💰 **Requested:** ${formatNum(amount)} coins\n💸 **Fee (${WITHDRAW_FEE_PERCENT}%):** ${formatNum(fee)} coins\n✅ **Net Payout:** ${formatNum(netAmount)} coins\n💳 **Balance After Lock:** ${formatNum(balanceAfter)} coins\n🧵 **Channel/Post:** <#${interaction.channel.id}>\n**ID:** \`${withdrawId}\``, 0xffcc00));
-      await interaction.reply({ content: "✅ Request submitted.", ephemeral: true });
+      await interaction.reply({ content: "✅ Request submitted.", flags: MessageFlags.Ephemeral });
       return;
     }
 
     if (command === "clearwithdraw") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const user = interaction.options.getUser("user");
       const pending = await Withdrawal.findOne({ guild_id: guildId, user_id: user.id, status: "pending" });
-      if (!pending) return interaction.reply({ content: `❌ ${user} has no pending withdrawal.`, ephemeral: true });
+      if (!pending) return interaction.reply({ content: `❌ ${user} has no pending withdrawal.`, flags: MessageFlags.Ephemeral });
 
       pending.status = "cancelled";
       pending.admin_id = interaction.user.id;
@@ -2239,11 +2241,11 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "addcoins") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const user = interaction.options.getUser("user");
       const amount = interaction.options.getInteger("amount");
-      if (amount <= 0) return interaction.reply({ content: "❌ Amount must be more than 0.", ephemeral: true });
+      if (amount <= 0) return interaction.reply({ content: "❌ Amount must be more than 0.", flags: MessageFlags.Ephemeral });
 
       await changeBalance(guildId, user.id, amount, "ADMIN_ADD", `Added by ${interaction.user.tag}`);
       const newBal = await getBal(guildId, user.id);
@@ -2253,14 +2255,14 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "removecoins") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const user = interaction.options.getUser("user");
       const input = interaction.options.getString("amount");
       const balance = await getBal(guildId, user.id);
 
       const parsed = parseAmountInput(input, balance);
-      if (parsed.error) return interaction.reply({ content: `❌ ${parsed.error}`, ephemeral: true });
+      if (parsed.error) return interaction.reply({ content: `❌ ${parsed.error}`, flags: MessageFlags.Ephemeral });
 
       const removeAmount = Math.min(balance, parsed.amount);
       const removeType = parsed.mode;
@@ -2279,13 +2281,13 @@ client.on("interactionCreate", async interaction => {
       const amount = interaction.options.getInteger("amount");
       const fromUser = interaction.user;
 
-      if (toUser.bot) return interaction.reply({ content: "❌ You cannot transfer Digital Silver to a bot.", ephemeral: true });
-      if (amount < MIN_TRANSFER) return interaction.reply({ content: `❌ Minimum transfer is **${formatNum(MIN_TRANSFER)} coin**.`, ephemeral: true });
+      if (toUser.bot) return interaction.reply({ content: "❌ You cannot transfer Digital Silver to a bot.", flags: MessageFlags.Ephemeral });
+      if (amount < MIN_TRANSFER) return interaction.reply({ content: `❌ Minimum transfer is **${formatNum(MIN_TRANSFER)} coin**.`, flags: MessageFlags.Ephemeral });
 
       try {
         await transferBalance(guildId, fromUser.id, toUser.id, amount, "TRANSFER_SENT", "TRANSFER_RECEIVED", `Transfer ${fromUser.tag} -> ${toUser.tag}`);
       } catch (err) {
-        return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+        return interaction.reply({ content: `❌ ${err.message}`, flags: MessageFlags.Ephemeral });
       }
 
       const senderBal = await getBal(guildId, fromUser.id);
@@ -2295,17 +2297,17 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "admintransfer") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const fromUser = interaction.options.getUser("from");
       const toUser = interaction.options.getUser("to");
       const amount = interaction.options.getInteger("amount");
-      if (amount <= 0) return interaction.reply({ content: "❌ Amount must be more than 0.", ephemeral: true });
+      if (amount <= 0) return interaction.reply({ content: "❌ Amount must be more than 0.", flags: MessageFlags.Ephemeral });
 
       try {
         await transferBalance(guildId, fromUser.id, toUser.id, amount, "ADMIN_TRANSFER_OUT", "ADMIN_TRANSFER_IN", `Admin transfer by ${interaction.user.tag}: ${fromUser.tag} -> ${toUser.tag}`);
       } catch (err) {
-        return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+        return interaction.reply({ content: `❌ ${err.message}`, flags: MessageFlags.Ephemeral });
       }
 
       const fromBal = await getBal(guildId, fromUser.id);
@@ -2313,7 +2315,7 @@ client.on("interactionCreate", async interaction => {
       const embed = makeLogEmbed("👑 Admin Transfer", `👤 **From:** ${fromUser}\n👤 **To:** ${toUser}\n💰 **Amount:** ${formatNum(amount)} Digital Silver\n🛡️ **Admin:** ${interaction.user}\n💳 **From New Balance:** ${formatNum(fromBal)} Digital Silver\n💳 **To New Balance:** ${formatNum(toBal)} Digital Silver`, 0xffcc00);
 
       await logToChannel(client, embed);
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
 
     if (command === "streak") {
@@ -2331,14 +2333,14 @@ client.on("interactionCreate", async interaction => {
       const creator = interaction.user;
       const bet = interaction.options.getInteger("bet");
 
-      if (bet < MIN_DUEL_BET) return interaction.reply({ content: `❌ Minimum duel bet is **${formatNum(MIN_DUEL_BET)} Digital Silver**.`, ephemeral: true });
-      if (bet > MAX_DUEL_BET) return interaction.reply({ content: `❌ Maximum duel bet is **${formatNum(MAX_DUEL_BET)} Digital Silver**.`, ephemeral: true });
+      if (bet < MIN_DUEL_BET) return interaction.reply({ content: `❌ Minimum duel bet is **${formatNum(MIN_DUEL_BET)} Digital Silver**.`, flags: MessageFlags.Ephemeral });
+      if (bet > MAX_DUEL_BET) return interaction.reply({ content: `❌ Maximum duel bet is **${formatNum(MAX_DUEL_BET)} Digital Silver**.`, flags: MessageFlags.Ephemeral });
 
       const openDuel = await Duel.findOne({ guild_id: guildId, creator_id: creator.id, status: "open" });
-      if (openDuel) return interaction.reply({ content: "❌ You already have an open duel. Start it or cancel it first.", ephemeral: true });
+      if (openDuel) return interaction.reply({ content: "❌ You already have an open duel. Start it or cancel it first.", flags: MessageFlags.Ephemeral });
 
       const bal = await getBal(guildId, creator.id);
-      if (bal < bet) return interaction.reply({ content: "❌ You do not have enough Digital Silver.", ephemeral: true });
+      if (bal < bet) return interaction.reply({ content: "❌ You do not have enough Digital Silver.", flags: MessageFlags.Ephemeral });
 
       const duelId = makeDuelId();
       const now = Date.now();
@@ -2359,8 +2361,9 @@ client.on("interactionCreate", async interaction => {
         expires_at: now + DUEL_LOBBY_TIMEOUT
       });
 
-      const msg = await interaction.reply({ embeds: [duelOpenEmbed(duel)], components: [duelButtons(duelId)], fetchReply: true });
-      duel.message_id = msg.id;
+      // RESOLVED DEPRECATION: Replace fetchReply with withResponse
+      const response = await interaction.reply({ embeds: [duelOpenEmbed(duel)], components: [duelButtons(duelId)], withResponse: true });
+      duel.message_id = response.resource?.message?.id || null;
       await duel.save();
 
       await logCasino(client, makeLogEmbed("⚔️ Duel Created", `👤 **Creator:** ${creator}\n💰 **Bet:** ${formatNum(bet)} Digital Silver\n🎮 **Duel:** \`${duelId}\``));
@@ -2368,7 +2371,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "coinflipadmin") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const status = interaction.options.getString("status");
       const enabled = status === "enable";
@@ -2397,11 +2400,11 @@ client.on("interactionCreate", async interaction => {
         )
         .setTimestamp();
 
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
 
     if (command === "blackjackadmin") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const status = interaction.options.getString("status");
       const enabled = status === "enable";
@@ -2413,20 +2416,20 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "blackjack") {
-      if (!(await isBlackjackEnabled(guildId))) return interaction.reply({ content: "❌ Blackjack is currently disabled by admins.", ephemeral: true });
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can host blackjack tables.", ephemeral: true });
+      if (!(await isBlackjackEnabled(guildId))) return interaction.reply({ content: "❌ Blackjack is currently disabled by admins.", flags: MessageFlags.Ephemeral });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can host blackjack tables.", flags: MessageFlags.Ephemeral });
 
       const host = interaction.user;
       const buyin = interaction.options.getInteger("buyin");
 
-      if (buyin < MIN_BLACKJACK_BUYIN) return interaction.reply({ content: `❌ Minimum blackjack buy-in is **${formatNum(MIN_BLACKJACK_BUYIN)} Digital Silver**.`, ephemeral: true });
-      if (buyin > MAX_BLACKJACK_BUYIN) return interaction.reply({ content: `❌ Maximum blackjack buy-in is **${formatNum(MAX_BLACKJACK_BUYIN)} Digital Silver**.`, ephemeral: true });
+      if (buyin < MIN_BLACKJACK_BUYIN) return interaction.reply({ content: `❌ Minimum blackjack buy-in is **${formatNum(MIN_BLACKJACK_BUYIN)} Digital Silver**.`, flags: MessageFlags.Ephemeral });
+      if (buyin > MAX_BLACKJACK_BUYIN) return interaction.reply({ content: `❌ Maximum blackjack buy-in is **${formatNum(MAX_BLACKJACK_BUYIN)} Digital Silver**.`, flags: MessageFlags.Ephemeral });
 
       const bal = await getBal(guildId, host.id);
-      if (bal < buyin) return interaction.reply({ content: "❌ You do not have enough Digital Silver to host this blackjack table.", ephemeral: true });
+      if (bal < buyin) return interaction.reply({ content: "❌ You do not have enough Digital Silver to host this blackjack table.", flags: MessageFlags.Ephemeral });
 
       const openGame = await BlackjackGame.findOne({ guild_id: guildId, host_id: host.id, status: "open" });
-      if (openGame) return interaction.reply({ content: "❌ You already have an open blackjack table. Start or cancel it first.", ephemeral: true });
+      if (openGame) return interaction.reply({ content: "❌ You already have an open blackjack table. Start or cancel it first.", flags: MessageFlags.Ephemeral });
 
       const gameId = makeBlackjackId();
       const now = Date.now();
@@ -2457,9 +2460,11 @@ client.on("interactionCreate", async interaction => {
       });
 
       const players = await BlackjackPlayer.find({ game_id: gameId }).sort({ joined_at: 1 });
-      const msg = await interaction.reply({ embeds: [bjLobbyEmbed(game, players)], components: [bjLobbyButtons(gameId)], fetchReply: true });
+      
+      // RESOLVED DEPRECATION: Replace fetchReply with withResponse
+      const response = await interaction.reply({ embeds: [bjLobbyEmbed(game, players)], components: [bjLobbyButtons(gameId)], withResponse: true });
 
-      game.message_id = msg.id;
+      game.message_id = response.resource?.message?.id || null;
       await game.save();
 
       await logCasino(client, makeLogEmbed("🃏 Blackjack Created", `👤 **Host/Admin:** ${host}\n💰 **Buy-in:** ${formatNum(buyin)} Digital Silver\n🎮 **Game:** \`${gameId}\``));
@@ -2467,7 +2472,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "coinflip") {
-      if (!(await isCoinflipEnabled(guildId))) return interaction.reply({ content: "❌ Coinflip is currently disabled by admins.", ephemeral: true });
+      if (!(await isCoinflipEnabled(guildId))) return interaction.reply({ content: "❌ Coinflip is currently disabled by admins.", flags: MessageFlags.Ephemeral });
 
       const creator = interaction.user;
       const choice = interaction.options.getString("choice");
@@ -2476,16 +2481,16 @@ client.on("interactionCreate", async interaction => {
       const userBal = await getBal(guildId, creator.id);
       const parsed = parseAmountInput(rawBet, userBal);
 
-      if (parsed.error) return interaction.reply({ content: `❌ ${parsed.error}`, ephemeral: true });
+      if (parsed.error) return interaction.reply({ content: `❌ ${parsed.error}`, flags: MessageFlags.Ephemeral });
 
       const bet = parsed.amount;
 
-      if (bet < MIN_BET) return interaction.reply({ content: `❌ Minimum coinflip bet is **${formatNum(MIN_BET)} coins**.`, ephemeral: true });
-      if (bet > MAX_BET) return interaction.reply({ content: `❌ Max bet is **${formatNum(MAX_BET)} coins**.`, ephemeral: true });
-      if (userBal < bet) return interaction.reply({ content: "❌ You do not have enough coins.", ephemeral: true });
+      if (bet < MIN_BET) return interaction.reply({ content: `❌ Minimum coinflip bet is **${formatNum(MIN_BET)} coins**.`, flags: MessageFlags.Ephemeral });
+      if (bet > MAX_BET) return interaction.reply({ content: `❌ Max bet is **${formatNum(MAX_BET)} coins**.`, flags: MessageFlags.Ephemeral });
+      if (userBal < bet) return interaction.reply({ content: "❌ You do not have enough coins.", flags: MessageFlags.Ephemeral });
 
       const existing = await Coinflip.findOne({ guild_id: guildId, creator_id: creator.id, status: "open" });
-      if (existing) return interaction.reply({ content: "❌ You already have an active coinflip. Cancel the old one using the red cancel button.", ephemeral: true });
+      if (existing) return interaction.reply({ content: "❌ You already have an active coinflip. Cancel the old one using the red cancel button.", flags: MessageFlags.Ephemeral });
 
       const gameId = makeGameId();
       await changeBalance(guildId, creator.id, -bet, "COINFLIP_CREATE_LOCK", `Coinflip created | Game: ${gameId}`);
@@ -2518,11 +2523,14 @@ client.on("interactionCreate", async interaction => {
         new ButtonBuilder().setCustomId(`cancel_coinflip:${gameId}`).setLabel("Cancel").setStyle(ButtonStyle.Danger)
       );
 
-      await interaction.reply({ embeds: [embed], components: [row] });
-      const msg = await interaction.fetchReply();
+      // RESOLVED DEPRECATION: Replace fetchReply with withResponse
+      const response = await interaction.reply({ embeds: [embed], components: [row], withResponse: true });
+      const msg = response.resource?.message;
 
-      game.message_id = msg.id;
-      await game.save();
+      if (msg) {
+        game.message_id = msg.id;
+        await game.save();
+      }
 
       // 📢 Send SEPARATE notification that auto-deletes in 1 minute
       await sendSeparateCoinflipNotification(client, guildId, creator.id, bet, choice);
@@ -2531,10 +2539,10 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "raidcancel") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const raid = await RaidBoss.findOne({ guild_id: guildId, status: { $in: ["open", "active"] } });
-      if (!raid) return interaction.reply({ content: "❌ No open or active raid found.", ephemeral: true });
+      if (!raid) return interaction.reply({ content: "❌ No open or active raid found.", flags: MessageFlags.Ephemeral });
 
       const players = await RaidPlayer.find({ raid_id: raid.raid_id });
 
@@ -2577,12 +2585,12 @@ client.on("interactionCreate", async interaction => {
 
       return interaction.reply({
         content: `✅ Raid cancelled.\n👥 Refunded **${players.length}** players.\n💰 Total refunded: **${formatNum(players.length * raid.join_fee)} Digital Silver**`,
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
 
     if (command === "raidadmin") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const status = interaction.options.getString("status");
       const enabled = status === "enable";
@@ -2594,13 +2602,13 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "raidspawn") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       if (!(await isRaidEnabled(guildId))) {
-        return interaction.reply({ content: "❌ Raid boss is disabled. Use `/raidadmin status:ENABLE` first.", ephemeral: true });
+        return interaction.reply({ content: "❌ Raid boss is disabled. Use `/raidadmin status:ENABLE` first.", flags: MessageFlags.Ephemeral });
       }
 
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const raid = await spawnRaidBoss(client, guildId);
       if (!raid) return interaction.editReply("❌ Could not spawn raid boss. Check `RAID_GENERAL_CHANNEL_ID` and `RAID_CHANNEL_ID`.");
@@ -2609,7 +2617,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (command === "dbstats") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const userCount = await User.countDocuments({ guild_id: guildId });
       const txCount = await Transaction.countDocuments({ guild_id: guildId });
@@ -2638,35 +2646,35 @@ client.on("interactionCreate", async interaction => {
           `📁 **Database Engine:** MongoDB`
         );
 
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
 
     if (command === "allbalances") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
 
       const rows = await User.find({ guild_id: guildId }).sort({ balance: -1 }).limit(50);
-      if (!rows.length) return interaction.reply({ content: "No balances found.", ephemeral: true });
+      if (!rows.length) return interaction.reply({ content: "No balances found.", flags: MessageFlags.Ephemeral });
 
       const text = rows.map((r, i) => `#${i + 1} | <@${r.user_id}> | ${formatNum(r.balance)} coins`).join("\n");
       const chunks = chunkText(text);
 
-      await interaction.reply({ content: `📊 **All Balances - Page 1/${chunks.length}**\n\`\`\`\n${chunks[0].replace(/<@/g, "@").replace(/>/g, "")}\n\`\`\``, ephemeral: true });
+      await interaction.reply({ content: `📊 **All Balances - Page 1/${chunks.length}**\n\`\`\`\n${chunks[0].replace(/<@/g, "@").replace(/>/g, "")}\n\`\`\``, flags: MessageFlags.Ephemeral });
 
       for (let i = 1; i < chunks.length; i++) {
-        await interaction.followUp({ content: `📊 **All Balances - Page ${i + 1}/${chunks.length}**\n\`\`\`\n${chunks[i].replace(/<@/g, "@").replace(/>/g, "")}\n\`\`\``, ephemeral: true });
+        await interaction.followUp({ content: `📊 **All Balances - Page ${i + 1}/${chunks.length}**\n\`\`\`\n${chunks[i].replace(/<@/g, "@").replace(/>/g, "")}\n\`\`\``, flags: MessageFlags.Ephemeral });
       }
       return;
     }
 
     if (command === "transactions") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
       const data = await makeTransactionsPage(guildId, 0);
-      return interaction.reply({ embeds: [data.embed], components: [pageButtons("transactions", data.page, data.maxPage, interaction.user.id)], ephemeral: true });
+      return interaction.reply({ embeds: [data.embed], components: [pageButtons("transactions", data.page, data.maxPage, interaction.user.id)], flags: MessageFlags.Ephemeral });
     }
 
   } catch (err) {
     console.error("Interaction error:", err);
-    return safeReply(interaction, { content: "❌ Something went wrong. Please tell an admin to check bot logs.", ephemeral: true });
+    return safeReply(interaction, { content: "❌ Something went wrong. Please tell an admin to check bot logs.", flags: MessageFlags.Ephemeral });
   }
 });
 
@@ -2686,4 +2694,3 @@ mongoose.connect(MONGODB_URI)
   .catch(err => {
     console.error("❌ MongoDB connection error:", err);
   });
-  // fix
