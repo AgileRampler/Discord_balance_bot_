@@ -30,14 +30,7 @@ const MAX_BLACKJACK_BUYIN = 1_000_000;
 const MAX_BLACKJACK_PLAYERS = 4;
 const BLACKJACK_LOBBY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const BLACKJACK_TURN_TIMEOUT = 2 * 60 * 1000;  // 2 minutes
-const RAID_JOIN_FEE = 100_000;
-const RAID_MIN_PLAYERS = 2;
-const RAID_MAX_PLAYERS = 30;
-const RAID_BOSS_HP = 50_000;
-const RAID_JOIN_WINDOW = 10 * 60 * 1000;      // 10 minutes
-const RAID_DURATION = 10 * 60 * 1000;         // 10 minutes
-const RAID_ACTION_COOLDOWN = 10 * 1000;       // 10 seconds
-const RAID_SPAWN_INTERVAL = 8 * 60 * 60 * 1000; // 8 hours
+
 const MIN_TRANSFER = 1;
 const MIN_DUEL_BET = 100_000;
 const MAX_DUEL_BET = 1_000_000;
@@ -121,39 +114,9 @@ const duelSchema = new mongoose.Schema({
 });
 const Duel = mongoose.model("Duel", duelSchema);
 
-const raidBossSchema = new mongoose.Schema({
-  raid_id: { type: String, required: true, unique: true },
-  guild_id: { type: String, required: true },
-  general_channel_id: { type: String, default: null },
-  general_message_id: { type: String, default: null },
-  raid_channel_id: { type: String, required: true },
-  raid_message_id: { type: String, default: null },
-  boss_name: { type: String, required: true },
-  boss_hp: { type: Number, required: true },
-  boss_max_hp: { type: Number, required: true },
-  join_fee: { type: Number, required: true },
-  reward_pool: { type: Number, default: 0 },
-  status: { type: String, default: "open" },
-  started_at: { type: Number, default: null },
-  ends_at: { type: Number, default: null },
-  created_at: { type: Number, default: Date.now },
-  updated_at: { type: Number, default: null }
-});
-const RaidBoss = mongoose.model("RaidBoss", raidBossSchema);
 
-const raidPlayerSchema = new mongoose.Schema({
-  raid_id: { type: String, required: true },
-  guild_id: { type: String, required: true },
-  user_id: { type: String, required: true },
-  damage: { type: Number, default: 0 },
-  healing: { type: Number, default: 0 },
-  tanking: { type: Number, default: 0 },
-  actions: { type: Number, default: 0 },
-  last_action_at: { type: Number, default: 0 },
-  joined_at: { type: Number, default: Date.now }
-});
-raidPlayerSchema.index({ raid_id: 1, user_id: 1 }, { unique: true });
-const RaidPlayer = mongoose.model("RaidPlayer", raidPlayerSchema);
+
+
 
 const blackjackGameSchema = new mongoose.Schema({
   game_id: { type: String, required: true, unique: true },
@@ -627,244 +590,12 @@ async function registerCommands() {
 // ==========================================
 // RAID BOSS LOGIC
 // ==========================================
-function makeRaidId() { return `RAID-${Date.now()}-${Math.floor(Math.random() * 999999)}`; }
-
-function getRaidBossName() {
-  const names = ["Ancient Dragon", "Avalonian Warlord", "Crystal Behemoth", "Demon Prince", "Undead Colossus"];
-  return names[Math.floor(Math.random() * names.length)];
-}
-
-function raidJoinButton(raidId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`raid_join:${raidId}`).setLabel("Join Raid").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`raid_cancel:${raidId}`).setLabel("Cancel Raid").setStyle(ButtonStyle.Danger)
-  );
-}
-
-function raidActionButtons(raidId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`raid_attack:${raidId}`).setLabel("⚔️ Attack").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(`raid_defend:${raidId}`).setLabel("🛡️ Defend").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`raid_heal:${raidId}`).setLabel("🩹 Heal").setStyle(ButtonStyle.Success)
-  );
-}
-
-function raidGeneralEmbed(raid, playerCount = 0) {
-  const raidChannelId = process.env.RAID_CHANNEL_ID;
-  const expireUnix = Math.floor((raid.created_at + RAID_JOIN_WINDOW) / 1000);
-
-  return new EmbedBuilder()
-    .setTitle("👹 Raid Boss Spawned!")
-    .setColor(0xff3b3b)
-    .setDescription(
-      `**Boss:** ${raid.boss_name}\n` +
-      `**HP:** ${formatNum(raid.boss_hp)} / ${formatNum(raid.boss_max_hp)}\n` +
-      `**Join Fee:** ${formatNum(raid.join_fee)} Digital Silver\n` +
-      `**Players:** ${playerCount}/${RAID_MAX_PLAYERS}\n` +
-      `**Minimum Required:** ${RAID_MIN_PLAYERS}\n` +
-      `**Current Reward Pool:** ${formatNum(raid.reward_pool)} Digital Silver (🏆 Winner Takes All)\n` +
-      `⏰ **Join Window:** <t:${expireUnix}:R>\n\n` +
-      `Click **Join Raid** here, then continue the fight in ${raidChannelId ? `<#${raidChannelId}>` : "the raid channel"}.\n\n` +
-      `Rewards are funded only by join fees, so the guild treasury does not lose money.`
-    );
-}
-
-function raidStatusEmbed(raid, players, logText = "") {
-  const hpBarLength = 20;
-  const filled = Math.max(0, Math.round((raid.boss_hp / raid.boss_max_hp) * hpBarLength));
-  const bar = "█".repeat(filled) + "░".repeat(hpBarLength - filled);
-
-  const topPlayers = players
-    .map(p => ({ ...p.toObject(), score: getRaidScore(p) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 10);
-
-  const leaderboard = topPlayers.length
-    ? topPlayers.map((p, i) =>
-        `**#${i + 1}** <@${p.user_id}> — Score: **${formatNum(Math.floor(p.score))}** | DMG ${formatNum(p.damage)} | HEAL ${formatNum(p.healing)} | TANK ${formatNum(p.tanking)}`
-      ).join("\n")
-    : "No players joined yet.";
-
-  const timeText = raid.status === "open"
-    ? `⏰ **Join Ends:** <t:${Math.floor((raid.created_at + RAID_JOIN_WINDOW) / 1000)}:R>`
-    : `⏰ **Raid Ends:** <t:${Math.floor((raid.ends_at || Date.now() + RAID_DURATION) / 1000)}:R>`;
-
-  return new EmbedBuilder()
-    .setTitle(`👹 Raid Boss: ${raid.boss_name}`)
-    .setColor(0xff3b3b)
-    .setDescription(
-      `**Status:** ${raid.status.toUpperCase()}\n` +
-      `**Boss HP:** ${formatNum(raid.boss_hp)} / ${formatNum(raid.boss_max_hp)}\n` +
-      `\`${bar}\`\n\n` +
-      `**Players:** ${players.length}/${RAID_MAX_PLAYERS}\n` +
-      `**Join Fee:** ${formatNum(raid.join_fee)} Digital Silver\n` +
-      `🏆 **Winner-Take-All Pool:** ${formatNum(raid.reward_pool)} Digital Silver\n` +
-      `${timeText}\n\n` +
-      `${logText ? `**Last Action:**\n${logText}\n\n` : ""}` +
-      `**Top Contributors:**\n${leaderboard}\n\n` +
-      `⚔️ Attack = damage score\n` +
-      `🩹 Heal = support score\n` +
-      `🛡️ Defend = tank score\n` +
-      `Action cooldown: ${RAID_ACTION_COOLDOWN / 1000}s`
-    );
-}
-
-function getRaidScore(player) {
-  return Number(player.damage || 0) + Number(player.healing || 0) * 0.8 + Number(player.tanking || 0) * 0.5;
-}
-
-async function updateRaidMessages(client, raidId, logText = "") {
-  const raid = await RaidBoss.findOne({ raid_id: raidId });
-  if (!raid) return;
-
-  const players = await RaidPlayer.find({ raid_id: raidId }).sort({ joined_at: 1 });
-
-  if (raid.raid_channel_id && raid.raid_message_id) {
-    try {
-      const channel = await client.channels.fetch(raid.raid_channel_id);
-      const msg = await channel.messages.fetch(raid.raid_message_id);
-
-      await msg.edit({
-        embeds: [raidStatusEmbed(raid, players, logText)],
-        components: raid.status === "active" ? [raidActionButtons(raidId)] : []
-      });
-    } catch (err) {
-      console.error("Raid message update error:", err);
-    }
-  }
-
-  if (raid.general_channel_id && raid.general_message_id && raid.status === "open") {
-    try {
-      const channel = await client.channels.fetch(raid.general_channel_id);
-      const msg = await channel.messages.fetch(raid.general_message_id);
-
-      await msg.edit({
-        embeds: [raidGeneralEmbed(raid, players.length)],
-        components: [raidJoinButton(raidId)]
-      });
-    } catch (err) {
-      console.error("Raid general message update error:", err);
-    }
-  }
-}
-
-async function spawnRaidBoss(client, manualGuildId = null) {
-  const generalChannelId = process.env.RAID_GENERAL_CHANNEL_ID;
-  const raidChannelId = process.env.RAID_CHANNEL_ID;
-
-  if (!generalChannelId || !raidChannelId) return null;
-
-  const raidChannel = await client.channels.fetch(raidChannelId).catch(() => null);
-  const generalChannel = await client.channels.fetch(generalChannelId).catch(() => null);
-
-  if (!raidChannel || !generalChannel) return null;
-
-  const guildId = manualGuildId || raidChannel.guild?.id || generalChannel.guild?.id;
-  if (!guildId || !(await isRaidEnabled(guildId))) return null;
-
-  const existing = await RaidBoss.findOne({ guild_id: guildId, status: { $in: ["open", "active"] } });
-  if (existing) return existing;
-
-  const raidId = makeRaidId();
-  const now = Date.now();
-
-  const raid = await RaidBoss.create({
-    raid_id: raidId,
-    guild_id: guildId,
-    general_channel_id: generalChannelId,
-    raid_channel_id: raidChannelId,
-    boss_name: getRaidBossName(),
-    boss_hp: RAID_BOSS_HP,
-    boss_max_hp: RAID_BOSS_HP,
-    join_fee: RAID_JOIN_FEE,
-    reward_pool: 0,
-    status: "open",
-    created_at: now,
-    updated_at: now
-  });
-
-  const generalMsg = await generalChannel.send({
-    embeds: [raidGeneralEmbed(raid, 0)],
-    components: [raidJoinButton(raidId)]
-  });
-
-  const raidMsg = await raidChannel.send({
-    embeds: [raidStatusEmbed(raid, [], `Raid boss spawned. Join from <#${generalChannelId}>.`)],
-    components: []
-  });
-
-  raid.general_message_id = generalMsg.id;
-  raid.raid_message_id = raidMsg.id;
-  await raid.save();
-
-  await logCasino(
-    client,
-    makeLogEmbed(
-      "👹 Raid Boss Spawned",
-      `**Boss:** ${raid.boss_name}\n` +
-      `🎮 **Raid:** \`${raidId}\`\n` +
-      `📢 **Spawn Channel:** <#${generalChannelId}>\n` +
-      `⚔️ **Raid Channel:** <#${raidChannelId}>\n` +
-      `💰 **Join Fee:** ${formatNum(RAID_JOIN_FEE)} Digital Silver`
-    )
-  );
-
-  return raid;
-}
 
 // ==========================================
 // WINNER-TAKE-ALL RAID FINISH LOGIC
 // ==========================================
-async function finishRaidBoss(client, guildId, raidId, defeated) {
-  const raid = await RaidBoss.findOne({ raid_id: raidId });
-  const players = await RaidPlayer.find({ raid_id: raidId });
 
-  if (!raid || !["active", "open"].includes(raid.status)) {
-    return makeLogEmbed("Raid Already Finished", `Raid \`${raidId}\` is already handled.`, 0x808080);
-  }
-
-  const ranked = players
-    .map(p => ({ ...p.toObject(), score: getRaidScore(p) }))
-    .sort((a, b) => b.score - a.score);
-
-  raid.status = defeated ? "finished" : "failed";
-  raid.updated_at = Date.now();
-  await raid.save();
-
-  if (defeated && ranked.length > 0) {
-    const winner = ranked[0];
-    const payout = raid.reward_pool;
-
-    if (payout > 0) {
-      await changeBalance(guildId, winner.user_id, payout, "RAID_REWARD", `Raid boss winner-take-all reward | Raid: ${raidId}`);
-    }
-  } else {
-    for (const player of players) {
-      await changeBalance(guildId, player.user_id, raid.join_fee, "RAID_REFUND", `Raid failed refund | Raid: ${raidId}`);
-    }
-  }
-
-  const rewardLines = ranked.length
-    ? ranked.map((p, i) => {
-        const isWinner = defeated && i === 0;
-        const reward = isWinner ? raid.reward_pool : (defeated ? 0 : raid.join_fee);
-        const crown = isWinner ? " 👑 **[WINNER TAKE ALL]**" : "";
-        return `**#${i + 1}** <@${p.user_id}> — Score **${formatNum(Math.floor(p.score))}** | Reward **${formatNum(reward)} Digital Silver**${crown}`;
-      }).join("\n")
-    : "No players.";
-
-  return makeLogEmbed(
-    defeated ? "🏆 Raid Boss Defeated" : "❌ Raid Boss Failed",
-    `**Boss:** ${raid.boss_name}\n` +
-    `🎮 **Raid:** \`${raidId}\`\n` +
-    `💰 **Total Pool:** ${formatNum(raid.reward_pool)} Digital Silver\n` +
-    `${defeated ? `🏆 **Winner Take All:** <@${ranked[0]?.user_id}> took the entire pool!` : "Join fees refunded."}\n\n` +
-    `**Final Ranking:**\n${rewardLines}`,
-    defeated ? 0x00ff00 : 0xff0000
-  );
-}
-
-// ==========================================
+// =========================================
 // BLACKJACK GAME LOGIC
 // ==========================================
 function makeBlackjackId() { return `BJ-${Date.now()}-${Math.floor(Math.random() * 999999)}`; }
@@ -1275,43 +1006,7 @@ async function checkExpiredDuels(client) {
   }
 }
 
-async function checkRaidBosses(client) {
-  const now = Date.now();
-  const expiredOpen = await RaidBoss.find({ status: "open", created_at: { $lte: now - RAID_JOIN_WINDOW } });
 
-  for (const raid of expiredOpen) {
-    const playerCount = await RaidPlayer.countDocuments({ raid_id: raid.raid_id });
-    if (playerCount < RAID_MIN_PLAYERS) {
-      const embed = await finishRaidBoss(client, raid.guild_id, raid.raid_id, false);
-      await logCasino(client, embed);
-
-      try {
-        const channel = await client.channels.fetch(raid.raid_channel_id);
-        const msg = await channel.messages.fetch(raid.raid_message_id);
-        await msg.edit({ embeds: [embed], components: [] });
-      } catch {}
-
-      try {
-        const channel = await client.channels.fetch(raid.general_channel_id);
-        const msg = await channel.messages.fetch(raid.general_message_id);
-        await msg.edit({ embeds: [embed], components: [] });
-      } catch {}
-    }
-  }
-
-  const expiredActive = await RaidBoss.find({ status: "active", ends_at: { $lte: now } });
-  for (const raid of expiredActive) {
-    const defeated = raid.boss_hp <= 0;
-    const embed = await finishRaidBoss(client, raid.guild_id, raid.raid_id, defeated);
-    await logCasino(client, embed);
-
-    try {
-      const channel = await client.channels.fetch(raid.raid_channel_id);
-      const msg = await channel.messages.fetch(raid.raid_message_id);
-      await msg.edit({ embeds: [embed], components: [] });
-    } catch {}
-  }
-}
 
 // ==========================================
 // DISCORD CLIENT INIT & EVENT HANDLERS
@@ -2088,16 +1783,7 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId.startsWith("bj_stay:")) return handleBlackjackMove(interaction, "stay");
       if (interaction.customId.startsWith("bj_split:")) return handleBlackjackMove(interaction, "split");
       if (interaction.customId.startsWith("bj_view:")) return handleBlackjackView(interaction);
-      if (interaction.customId.startsWith("raid_join:")) return handleRaidJoin(interaction);
-      if (interaction.customId.startsWith("raid_cancel:")) return handleRaidCancelButton(interaction);
-      if (interaction.customId.startsWith("duel_join:")) return handleDuelJoin(interaction);
-      if (interaction.customId.startsWith("duel_cancel:")) return handleDuelCancel(interaction);
-      if (interaction.customId.startsWith("duel_attack:")) return handleDuelMove(interaction, "attack");
-      if (interaction.customId.startsWith("duel_defend:")) return handleDuelMove(interaction, "defend");
-      if (interaction.customId.startsWith("duel_heavy:")) return handleDuelMove(interaction, "heavy");
-      if (interaction.customId.startsWith("raid_attack:")) return handleRaidAction(interaction, "attack");
-      if (interaction.customId.startsWith("raid_defend:")) return handleRaidAction(interaction, "defend");
-      if (interaction.customId.startsWith("raid_heal:")) return handleRaidAction(interaction, "heal");
+      
 
       return;
     }
@@ -2538,83 +2224,7 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    if (command === "raidcancel") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
-
-      const raid = await RaidBoss.findOne({ guild_id: guildId, status: { $in: ["open", "active"] } });
-      if (!raid) return interaction.reply({ content: "❌ No open or active raid found.", flags: MessageFlags.Ephemeral });
-
-      const players = await RaidPlayer.find({ raid_id: raid.raid_id });
-
-      raid.status = "cancelled";
-      raid.updated_at = Date.now();
-      await raid.save();
-
-      for (const player of players) {
-        await changeBalance(guildId, player.user_id, raid.join_fee, "RAID_CANCEL_REFUND", `Raid cancelled by admin ${interaction.user.tag} | Raid: ${raid.raid_id}`);
-      }
-
-      const embed = makeLogEmbed(
-        "🚫 Raid Boss Cancelled",
-        `**Boss:** ${raid.boss_name}\n` +
-        `🎮 **Raid:** \`${raid.raid_id}\`\n` +
-        `🛡️ **Cancelled By:** ${interaction.user}\n` +
-        `👥 **Players Refunded:** ${players.length}\n` +
-        `💰 **Refund Each:** ${formatNum(raid.join_fee)} Digital Silver\n` +
-        `💰 **Total Refunded:** ${formatNum(players.length * raid.join_fee)} Digital Silver`,
-        0x808080
-      );
-
-      await logCasino(client, embed);
-
-      if (raid.raid_channel_id && raid.raid_message_id) {
-        try {
-          const channel = await client.channels.fetch(raid.raid_channel_id);
-          const msg = await channel.messages.fetch(raid.raid_message_id);
-          await msg.edit({ embeds: [embed], components: [] });
-        } catch (err) { console.error(err); }
-      }
-
-      if (raid.general_channel_id && raid.general_message_id) {
-        try {
-          const channel = await client.channels.fetch(raid.general_channel_id);
-          const msg = await channel.messages.fetch(raid.general_message_id);
-          await msg.edit({ embeds: [embed], components: [] });
-        } catch (err) { console.error(err); }
-      }
-
-      return interaction.reply({
-        content: `✅ Raid cancelled.\n👥 Refunded **${players.length}** players.\n💰 Total refunded: **${formatNum(players.length * raid.join_fee)} Digital Silver**`,
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
-    if (command === "raidadmin") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
-
-      const status = interaction.options.getString("status");
-      const enabled = status === "enable";
-
-      await setRaidEnabled(guildId, enabled);
-      await logCasino(client, makeLogEmbed(enabled ? "✅ Raid Boss Enabled" : "🛑 Raid Boss Disabled", `🛡️ **Admin:** ${interaction.user}\n📌 **Status:** ${enabled ? "Enabled" : "Disabled"}`, enabled ? 0x00ff00 : 0xff0000));
-
-      return interaction.reply(enabled ? "✅ Raid boss has been **enabled**." : "🛑 Raid boss has been **disabled**.");
-    }
-
-    if (command === "raidspawn") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
-
-      if (!(await isRaidEnabled(guildId))) {
-        return interaction.reply({ content: "❌ Raid boss is disabled. Use `/raidadmin status:ENABLE` first.", flags: MessageFlags.Ephemeral });
-      }
-
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-      const raid = await spawnRaidBoss(client, guildId);
-      if (!raid) return interaction.editReply("❌ Could not spawn raid boss. Check `RAID_GENERAL_CHANNEL_ID` and `RAID_CHANNEL_ID`.");
-
-      return interaction.editReply(`✅ Raid boss spawned in <#${process.env.RAID_GENERAL_CHANNEL_ID}>. Players continue in <#${process.env.RAID_CHANNEL_ID}>.`);
-    }
+ 
 
     if (command === "dbstats") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
@@ -2641,7 +2251,6 @@ client.on("interactionCreate", async interaction => {
           `🪙 **Open Coinflips:** ${openFlips}\n` +
           `✅ **Finished Coinflips:** ${finishedFlips}\n` +
           `💸 **Pending Withdrawals:** ${pendingWithdrawals}\n` +
-          `👹 **Active/Open Raids:** ${activeRaids}\n` +
           `💰 **Total Coins:** ${formatNum(totalCoins)}\n` +
           `📁 **Database Engine:** MongoDB`
         );
