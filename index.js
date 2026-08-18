@@ -1,3 +1,18 @@
+/*
+Version Formats
+V1 – Andromeda (or Apollo)
+
+V2 – Betelgeuse (or Borealis)
+
+V3 – Cassiopeia (or Cosmos)
+
+V4 – Draco
+
+V5 – Eclipse
+
+V6 – Fornax
+*/
+
 require("dotenv").config();
 
 const {
@@ -20,7 +35,7 @@ const mongoose = require("mongoose");
 // ==========================================
 // CONSTANTS & CONFIG
 // ==========================================
-const BOT_VERSION = "4.0.0";
+const BOT_VERSION = "1.0.0 Andromeda   ";
 const MAX_BET = 1_000_000;
 const MIN_BET = 100_000;
 const MIN_WITHDRAW = 500_000;
@@ -39,7 +54,7 @@ const DUEL_LOBBY_TIMEOUT = 5 * 60 * 1000;     // 5 minutes
 const DUEL_TURN_TIMEOUT = 5 * 60 * 1000;      // 5 minutes
 
 // ==========================================
-// NUMBER FORMATTING HELPER (ENFORCES 100,000 FORMAT)
+// NUMBER FORMATTING HELPER
 // ==========================================
 function formatNum(num) {
   return Number(num || 0).toLocaleString("en-US");
@@ -60,8 +75,7 @@ const User = mongoose.model("User", userSchema);
 const settingsSchema = new mongoose.Schema({
   guild_id: { type: String, required: true, unique: true },
   coinflip_enabled: { type: Boolean, default: true },
-  blackjack_enabled: { type: Boolean, default: true },
-  raid_enabled: { type: Boolean, default: true }
+  blackjack_enabled: { type: Boolean, default: true }
 });
 const Settings = mongoose.model("Settings", settingsSchema);
 
@@ -113,10 +127,6 @@ const duelSchema = new mongoose.Schema({
   updated_at: { type: Number, default: null }
 });
 const Duel = mongoose.model("Duel", duelSchema);
-
-
-
-
 
 const blackjackGameSchema = new mongoose.Schema({
   game_id: { type: String, required: true, unique: true },
@@ -233,16 +243,6 @@ async function isBlackjackEnabled(guildId) {
 
 async function setBlackjackEnabled(guildId, enabled) {
   await Settings.findOneAndUpdate({ guild_id: guildId }, { $set: { blackjack_enabled: enabled } }, { upsert: true });
-}
-
-async function isRaidEnabled(guildId) {
-  let set = await Settings.findOne({ guild_id: guildId });
-  if (!set) set = await Settings.create({ guild_id: guildId, raid_enabled: true });
-  return set.raid_enabled;
-}
-
-async function setRaidEnabled(guildId, enabled) {
-  await Settings.findOneAndUpdate({ guild_id: guildId }, { $set: { raid_enabled: enabled } }, { upsert: true });
 }
 
 // ==========================================
@@ -411,23 +411,17 @@ function pageButtons(type, page, maxPage, userId, targetId = "none") {
 }
 
 // ==========================================
-// SEPARATE AUTO-DELETING COINFLIP NOTIFICATION (1 MINUTE)
+// SEPARATE AUTO-DELETING COINFLIP NOTIFICATION
 // ==========================================
 async function sendSeparateCoinflipNotification(client, guildId, creatorId, amount, choice) {
   const generalChannelId = process.env.RAID_GENERAL_CHANNEL_ID;
   const casinoChannelId = process.env.CASINO_CHANNEL_ID;
 
-  if (!generalChannelId) {
-    console.warn("⚠️ Coinflip Notification Skipped: RAID_GENERAL_CHANNEL_ID missing in .env");
-    return;
-  }
+  if (!generalChannelId) return;
 
   try {
     const generalChannel = await client.channels.fetch(generalChannelId).catch(() => null);
-    if (!generalChannel || !generalChannel.isTextBased()) {
-      console.warn(`⚠️ Coinflip Notification Failed: General channel (${generalChannelId}) invalid or not text-based.`);
-      return;
-    }
+    if (!generalChannel || !generalChannel.isTextBased()) return;
 
     const embed = new EmbedBuilder()
       .setTitle("🎰 Live Casino Activity")
@@ -564,9 +558,6 @@ const commands = [
   new SlashCommandBuilder().setName("blackjack").setDescription("Admin host: create a 4-player PvP blackjack table").setDefaultMemberPermissions(PermissionFlagsBits.Administrator).addIntegerOption(o => o.setName("buyin").setDescription("Buy-in amount").setRequired(true)),
   new SlashCommandBuilder().setName("blackjackadmin").setDescription("Admin only: enable or disable blackjack").setDefaultMemberPermissions(PermissionFlagsBits.Administrator).addStringOption(o => o.setName("status").setDescription("Enable or disable blackjack").setRequired(true).addChoices({ name: "ENABLE", value: "enable" }, { name: "DISABLE", value: "disable" })),
   new SlashCommandBuilder().setName("coinflipadmin").setDescription("Admin only: enable or disable coinflip").setDefaultMemberPermissions(PermissionFlagsBits.Administrator).addStringOption(o => o.setName("status").setDescription("Enable or disable coinflip").setRequired(true).addChoices({ name: "ENABLE", value: "enable" }, { name: "DISABLE", value: "disable" })),
-  new SlashCommandBuilder().setName("raidspawn").setDescription("Admin only: manually spawn a raid boss").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName("raidcancel").setDescription("Admin only: cancel the current open/active raid and refund players").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName("raidadmin").setDescription("Admin only: enable or disable raid boss spawns").setDefaultMemberPermissions(PermissionFlagsBits.Administrator).addStringOption(o => o.setName("status").setDescription("Enable or disable raid boss").setRequired(true).addChoices({ name: "ENABLE", value: "enable" }, { name: "DISABLE", value: "disable" })),
   new SlashCommandBuilder().setName("dbstats").setDescription("Admin only: show database stats").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName("allbalances").setDescription("Admin only: show top 50 balances from database").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName("transactions").setDescription("Admin only: show latest database transactions").setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -588,14 +579,6 @@ async function registerCommands() {
 }
 
 // ==========================================
-// RAID BOSS LOGIC
-// ==========================================
-
-// ==========================================
-// WINNER-TAKE-ALL RAID FINISH LOGIC
-// ==========================================
-
-// =========================================
 // BLACKJACK GAME LOGIC
 // ==========================================
 function makeBlackjackId() { return `BJ-${Date.now()}-${Math.floor(Math.random() * 999999)}`; }
@@ -913,7 +896,7 @@ async function checkExpiredBlackjackGames(client) {
       await changeBalance(game.guild_id, player.user_id, game.buyin, "BLACKJACK_EXPIRE_REFUND", `Blackjack lobby expired | Game: ${game.game_id}`);
     }
 
-    const embed = makeLogEmbed("⏰ Blackjack Expired", `🎮 **Game:** \`${game.game_id}\`\n💰 **Refunded Players:** ${players.length}\n\nNo start within 5 minutes.`, 0x808080);
+    const embed = makeLogEmbed("⏰ Blackjack Expired", `🎮 **Game:** \`${game.game_id}\`\n💰 **Refunded Players:** ${players.length}\n\nNo start within 5 minutes.", 0x808080`);
     await logCasino(client, embed);
 
     if (game.channel_id && game.message_id) {
@@ -1006,14 +989,11 @@ async function checkExpiredDuels(client) {
   }
 }
 
-
-
 // ==========================================
 // DISCORD CLIENT INIT & EVENT HANDLERS
 // ==========================================
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// RESOLVED DEPRECATION: Using clientReady event name for v14/v15
 client.once("clientReady", async () => {
   console.log(`✅ Logged in as ${client.user.tag} | Version ${BOT_VERSION}`);
 
@@ -1024,11 +1004,9 @@ client.once("clientReady", async () => {
 
   await registerCommands();
 
-  setInterval(() => spawnRaidBoss(client).catch(err => console.error("Auto raid spawn error:", err)), RAID_SPAWN_INTERVAL);
   setInterval(() => expireOldCoinflips(client), 60_000);
   setInterval(() => checkExpiredBlackjackGames(client), 60_000);
   setInterval(() => checkExpiredDuels(client), 60_000);
-  setInterval(() => checkRaidBosses(client), 60_000);
 });
 
 // ==========================================
@@ -1336,172 +1314,6 @@ async function handleDuelMove(interaction, move) {
   return interaction.update({ embeds: [duelBattleEmbed(duel, logText)], components: [duelFightButtons(duelId)] });
 }
 
-async function handleRaidJoin(interaction) {
-  const guildId = interaction.guild.id;
-  const raidId = interaction.customId.replace("raid_join:", "");
-  const raid = await RaidBoss.findOne({ raid_id: raidId, status: "open" });
-
-  if (!raid) return interaction.reply({ content: "❌ This raid is no longer open for joining.", flags: MessageFlags.Ephemeral });
-
-  const count = await RaidPlayer.countDocuments({ raid_id: raidId });
-  if (count >= RAID_MAX_PLAYERS) return interaction.reply({ content: "❌ Raid is full.", flags: MessageFlags.Ephemeral });
-
-  const existing = await RaidPlayer.findOne({ raid_id: raidId, user_id: interaction.user.id });
-  if (existing) return interaction.reply({ content: `✅ You already joined. Continue in <#${raid.raid_channel_id}>.`, flags: MessageFlags.Ephemeral });
-
-  const bal = await getBal(guildId, interaction.user.id);
-  if (bal < raid.join_fee) return interaction.reply({ content: `❌ You need **${formatNum(raid.join_fee)} Digital Silver** to join this raid.`, flags: MessageFlags.Ephemeral });
-
-  await changeBalance(guildId, interaction.user.id, -raid.join_fee, "RAID_JOIN_FEE", `Joined raid boss | Raid: ${raidId}`);
-
-  await RaidPlayer.create({
-    raid_id: raidId,
-    guild_id: guildId,
-    user_id: interaction.user.id,
-    joined_at: Date.now()
-  });
-
-  raid.reward_pool += raid.join_fee;
-  raid.updated_at = Date.now();
-  await raid.save();
-
-  const newCount = await RaidPlayer.countDocuments({ raid_id: raidId });
-
-  if (newCount >= RAID_MIN_PLAYERS && raid.status === "open") {
-    raid.status = "active";
-    raid.started_at = Date.now();
-    raid.ends_at = Date.now() + RAID_DURATION;
-    raid.updated_at = Date.now();
-    await raid.save();
-
-    await updateRaidMessages(client, raidId, "Minimum players reached. Raid started!");
-  } else {
-    await updateRaidMessages(client, raidId, `<@${interaction.user.id}> joined the raid.`);
-  }
-
-  return interaction.reply({
-    content: `✅ You joined the raid. **${formatNum(raid.join_fee)} Digital Silver** locked into the pool.\nContinue the fight here: <#${raid.raid_channel_id}>`,
-    flags: MessageFlags.Ephemeral
-  });
-}
-
-async function handleRaidCancelButton(interaction) {
-  const guildId = interaction.guild.id;
-  const raidId = interaction.customId.replace("raid_cancel:", "");
-
-  if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
-    return interaction.reply({ content: "❌ Only admins can cancel raids.", flags: MessageFlags.Ephemeral });
-  }
-
-  const raid = await RaidBoss.findOne({ raid_id: raidId, guild_id: guildId, status: { $in: ["open", "active"] } });
-  if (!raid) return interaction.reply({ content: "❌ This raid is already finished/cancelled.", flags: MessageFlags.Ephemeral });
-
-  const players = await RaidPlayer.find({ raid_id: raidId });
-
-  raid.status = "cancelled";
-  raid.updated_at = Date.now();
-  await raid.save();
-
-  for (const player of players) {
-    await changeBalance(guildId, player.user_id, raid.join_fee, "RAID_CANCEL_REFUND", `Raid cancelled by admin button ${interaction.user.tag} | Raid: ${raidId}`);
-  }
-
-  const embed = makeLogEmbed(
-    "🚫 Raid Boss Cancelled",
-    `**Boss:** ${raid.boss_name}\n` +
-    `🎮 **Raid:** \`${raidId}\`\n` +
-    `🛡️ **Cancelled By:** ${interaction.user}\n` +
-    `👥 **Players Refunded:** ${players.length}\n` +
-    `💰 **Refund Each:** ${formatNum(raid.join_fee)} Digital Silver\n` +
-    `💰 **Total Refunded:** ${formatNum(players.length * raid.join_fee)} Digital Silver`,
-    0x808080
-  );
-
-  await logCasino(client, embed);
-
-  if (raid.raid_channel_id && raid.raid_message_id) {
-    try {
-      const channel = await client.channels.fetch(raid.raid_channel_id);
-      const msg = await channel.messages.fetch(raid.raid_message_id);
-      await msg.edit({ embeds: [embed], components: [] });
-    } catch (err) { console.error(err); }
-  }
-
-  if (raid.general_channel_id && raid.general_message_id) {
-    try {
-      const channel = await client.channels.fetch(raid.general_channel_id);
-      const msg = await channel.messages.fetch(raid.general_message_id);
-      await msg.edit({ embeds: [embed], components: [] });
-    } catch (err) { console.error(err); }
-  }
-
-  return interaction.reply({
-    content: `✅ Raid cancelled.\n👥 Refunded **${players.length}** players.\n💰 Total refunded: **${formatNum(players.length * raid.join_fee)} Digital Silver**`,
-    flags: MessageFlags.Ephemeral
-  });
-}
-
-async function handleRaidAction(interaction, action) {
-  const guildId = interaction.guild.id;
-  const raidId = interaction.customId.replace(`raid_${action}:`, "");
-  const raid = await RaidBoss.findOne({ raid_id: raidId, status: "active" });
-
-  if (!raid) return interaction.reply({ content: "❌ This raid is not active.", flags: MessageFlags.Ephemeral });
-
-  const player = await RaidPlayer.findOne({ raid_id: raidId, user_id: interaction.user.id });
-  if (!player) return interaction.reply({ content: "❌ You must join the raid from the spawn message first.", flags: MessageFlags.Ephemeral });
-
-  const now = Date.now();
-  const waitMs = RAID_ACTION_COOLDOWN - (now - Number(player.last_action_at || 0));
-  if (waitMs > 0) return interaction.reply({ content: `⏳ You are on cooldown. Try again in **${Math.ceil(waitMs / 1000)}s**.`, flags: MessageFlags.Ephemeral });
-
-  let damage = 0, healing = 0, tanking = 0, logText = "";
-
-  if (action === "attack") {
-    damage = Math.floor(Math.random() * 351) + 250;
-    logText = `<@${interaction.user.id}> attacked and dealt **${formatNum(damage)} damage**.`;
-  }
-  if (action === "heal") {
-    healing = Math.floor(Math.random() * 201) + 150;
-    logText = `<@${interaction.user.id}> healed the raid for **${formatNum(healing)} support**.`;
-  }
-  if (action === "defend") {
-    tanking = Math.floor(Math.random() * 251) + 200;
-    logText = `<@${interaction.user.id}> defended the raid and gained **${formatNum(tanking)} tank score**.`;
-  }
-
-  const newHp = Math.max(0, raid.boss_hp - damage);
-
-  player.damage += damage;
-  player.healing += healing;
-  player.tanking += tanking;
-  player.actions += 1;
-  player.last_action_at = now;
-  await player.save();
-
-  raid.boss_hp = newHp;
-  raid.updated_at = now;
-  await raid.save();
-
-  if (newHp <= 0) {
-    const embed = await finishRaidBoss(client, guildId, raidId, true);
-    await logCasino(client, embed);
-
-    if (raid.raid_channel_id && raid.raid_message_id) {
-      try {
-        const channel = await client.channels.fetch(raid.raid_channel_id);
-        const msg = await channel.messages.fetch(raid.raid_message_id);
-        await msg.edit({ embeds: [embed], components: [] });
-      } catch {}
-    }
-
-    return interaction.update({ embeds: [embed], components: [] }).catch(() => interaction.reply({ content: "🏆 Raid boss defeated!", flags: MessageFlags.Ephemeral }));
-  }
-
-  await updateRaidMessages(client, raidId, logText);
-  return interaction.deferUpdate().catch(() => {});
-}
-
 async function handleBlackjackJoin(interaction) {
   const guildId = interaction.guild.id;
   if (!(await isBlackjackEnabled(guildId))) return interaction.reply({ content: "❌ Blackjack is currently disabled by admins.", flags: MessageFlags.Ephemeral });
@@ -1783,7 +1595,11 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId.startsWith("bj_stay:")) return handleBlackjackMove(interaction, "stay");
       if (interaction.customId.startsWith("bj_split:")) return handleBlackjackMove(interaction, "split");
       if (interaction.customId.startsWith("bj_view:")) return handleBlackjackView(interaction);
-      
+      if (interaction.customId.startsWith("duel_join:")) return handleDuelJoin(interaction);
+      if (interaction.customId.startsWith("duel_cancel:")) return handleDuelCancel(interaction);
+      if (interaction.customId.startsWith("duel_attack:")) return handleDuelMove(interaction, "attack");
+      if (interaction.customId.startsWith("duel_defend:")) return handleDuelMove(interaction, "defend");
+      if (interaction.customId.startsWith("duel_heavy:")) return handleDuelMove(interaction, "heavy");
 
       return;
     }
@@ -2047,7 +1863,6 @@ client.on("interactionCreate", async interaction => {
         expires_at: now + DUEL_LOBBY_TIMEOUT
       });
 
-      // RESOLVED DEPRECATION: Replace fetchReply with withResponse
       const response = await interaction.reply({ embeds: [duelOpenEmbed(duel)], components: [duelButtons(duelId)], withResponse: true });
       duel.message_id = response.resource?.message?.id || null;
       await duel.save();
@@ -2146,8 +1961,6 @@ client.on("interactionCreate", async interaction => {
       });
 
       const players = await BlackjackPlayer.find({ game_id: gameId }).sort({ joined_at: 1 });
-      
-      // RESOLVED DEPRECATION: Replace fetchReply with withResponse
       const response = await interaction.reply({ embeds: [bjLobbyEmbed(game, players)], components: [bjLobbyButtons(gameId)], withResponse: true });
 
       game.message_id = response.resource?.message?.id || null;
@@ -2209,7 +2022,6 @@ client.on("interactionCreate", async interaction => {
         new ButtonBuilder().setCustomId(`cancel_coinflip:${gameId}`).setLabel("Cancel").setStyle(ButtonStyle.Danger)
       );
 
-      // RESOLVED DEPRECATION: Replace fetchReply with withResponse
       const response = await interaction.reply({ embeds: [embed], components: [row], withResponse: true });
       const msg = response.resource?.message;
 
@@ -2218,13 +2030,9 @@ client.on("interactionCreate", async interaction => {
         await game.save();
       }
 
-      // 📢 Send SEPARATE notification that auto-deletes in 1 minute
       await sendSeparateCoinflipNotification(client, guildId, creator.id, bet, choice);
-
       return;
     }
-
- 
 
     if (command === "dbstats") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Only admins can use this.", flags: MessageFlags.Ephemeral });
@@ -2234,7 +2042,6 @@ client.on("interactionCreate", async interaction => {
       const openFlips = await Coinflip.countDocuments({ guild_id: guildId, status: "open" });
       const finishedFlips = await Coinflip.countDocuments({ guild_id: guildId, status: "finished" });
       const pendingWithdrawals = await Withdrawal.countDocuments({ guild_id: guildId, status: "pending" });
-      const activeRaids = await RaidBoss.countDocuments({ guild_id: guildId, status: { $in: ["open", "active"] } });
 
       const totalCoinsArr = await User.aggregate([
         { $match: { guild_id: guildId } },
